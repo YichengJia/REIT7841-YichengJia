@@ -19,12 +19,12 @@ This project implements a novel **Superior Asynchronous Federated Learning Proto
 ┌─────────────────────────────────────────────────────────────┐
 │                    Project Structure                        │
 ├─────────────────────────────────────────────────────────────┤
-│ improved_async_fed_protocol.py  │ Core Protocol Implementation│
-│ enhanced_ml_performance.py      │ ML Performance Testing      │
-│ enhanced_protocol_comparison.py │ Comparative Analysis        │
-│ optimized_parameter_analysis.py │ Parameter Optimization      │
-│ run_comprehensive_experiments.py│ Experiment Orchestration    │
-│ test.py                        │ Parameter Tuning Framework   │
+│ improved_async_fed_protocol.py  │ Protocol Implementation   │
+│ enhanced_ml_performance.py      │ ML Performance Testing    │
+│ enhanced_protocol_comparison.py │ Comparative Analysis      │
+│ optimized_parameter_analysis.py │ Parameter Optimization    │
+│ run_comprehensive_experiments.py│ Experiment Orchestration  │
+│ test.py                         │ Parameter Tuning Framework│
 └─────────────────────────────────────────────────────────────┘
 ```
 
