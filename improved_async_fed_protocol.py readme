@@ -276,4 +276,3 @@ protocol.shutdown()  # Stops background threads gracefully
 
 ---
 
-This protocol represents a significant advancement in federated learning for robotic systems, providing the foundation for efficient, robust, and adaptive distributed machine learning.
