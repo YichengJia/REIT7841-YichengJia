@@ -30,12 +30,6 @@ This project implements a novel **Superior Asynchronous Federated Learning Proto
 
 ##  Quick Start
 
-### Prerequisites
-
-```bash
-pip install torch torchvision numpy scikit-learn matplotlib threading time
-```
-
 ### Basic Usage
 
 ```python
