@@ -10,8 +10,7 @@ This project implements a novel **Superior Asynchronous Federated Learning Proto
 - **Adaptive Weighting**: Dynamic client contribution assessment based on data quality and network conditions
 - **Communication Efficiency**: 10-15% reduction in bandwidth usage compared to traditional FedAvg
 - **Fault Tolerance**: Perfect robustness against network interruptions and client failures
-- **Multi-Modal Support**: Handles heterogeneous sensor data (LiDAR, vision, text)
-- **Real-Time Adaptation**: Sub-second decision-making capabilities
+
 
 ##  Architecture
 
