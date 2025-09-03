@@ -1,0 +1,11 @@
+{
+  "best_config": {
+    "adaptive_weighting": true,
+    "momentum": 0.9,
+    "max_staleness": 30,
+    "min_buffer_size": 3,
+    "max_buffer_size": 8,
+    "compression_ratio": 0.3
+  },
+  "best_score": 0.6183822682286575
+}
