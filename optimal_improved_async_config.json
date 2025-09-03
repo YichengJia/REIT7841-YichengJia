@@ -1,8 +1,0 @@
-{
-  "max_staleness": 10,
-  "min_buffer_size": 2,
-  "max_buffer_size": 4,
-  "compression_ratio": 0.7,
-  "momentum": 0.7,
-  "adaptive_weighting": true
-}
