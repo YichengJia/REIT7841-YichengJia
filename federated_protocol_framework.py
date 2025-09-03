@@ -14,6 +14,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
 import logging
+from compression_strategies import TopKCompressor, SignSGDCompressor, QSGDCompressor
 
 logging.getLogger().setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -155,7 +156,15 @@ class FederatedProtocol(ABC):
         """Calculate update size in MB"""
         total_bytes = 0
         for tensor in update_data.values():
-            if tensor is not None:
+            if tensor is None:
+                continue
+            if isinstance(tensor, tuple):  # compressed (comp, shape)
+                comp, shape = tensor
+                if isinstance(comp, np.ndarray):
+                    total_bytes += comp.nbytes
+                elif isinstance(comp, torch.Tensor):
+                    total_bytes += comp.numel() * comp.element_size()
+            else:  # raw tensor
                 total_bytes += tensor.numel() * tensor.element_size()
         return total_bytes / (1024 * 1024)
 
@@ -175,8 +184,28 @@ class SyncFedAvg(FederatedProtocol):
         self.round_buffer = []
         self.round_start_time = time.time()
 
+        self.compression = kwargs.get('compression', None)
+
+        # Initialize compressor
+        if self.compression == "topk":
+            self.compressor = TopKCompressor(kwargs.get('k', 100))
+        elif self.compression == "signsgd":
+            self.compressor = SignSGDCompressor()
+        elif self.compression == "qsgd":
+            self.compressor = QSGDCompressor(kwargs.get('num_bits', 8))
+        else:
+            self.compressor = None
+
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
         with self._lock:
+            # Optional compression before storing
+            if hasattr(self, "compressor") and self.compressor is not None:
+                compressed_update = {}
+                for name, delta in update.update_data.items():
+                    comp, shape = self.compressor.compress(delta)
+                    compressed_update[name] = (comp, shape)
+                update.update_data = compressed_update
+
             # Check if update is for current round
             if update.model_version != self.current_round:
                 self.metrics.update_communication(
@@ -188,7 +217,7 @@ class SyncFedAvg(FederatedProtocol):
             # Add to round buffer
             self.round_buffer.append(update)
 
-            # Record metrics
+            # Record metrics (count compressed size if enabled)
             update_size = self.calculate_update_size(update.update_data)
             self.metrics.update_communication(update_size, accepted=True)
 
@@ -201,20 +230,29 @@ class SyncFedAvg(FederatedProtocol):
             return True, self.current_round
 
     def aggregate_updates(self):
-        """Perform FedAvg aggregation"""
+        """Perform FedAvg aggregation with optional decompression"""
         if not self.round_buffer:
             return
 
+        # Decompress if needed
+        decompressed_buffer = []
+        for update in self.round_buffer:
+            if hasattr(self, "compressor") and self.compressor is not None:
+                decompressed_update = {}
+                for name, (comp, shape) in update.update_data.items():
+                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                update.update_data = decompressed_update
+            decompressed_buffer.append(update)
+
         # Calculate weighted average
-        total_data_size = sum(u.data_size for u in self.round_buffer)
+        total_data_size = sum(u.data_size for u in decompressed_buffer)
         aggregated = {}
 
-        for update in self.round_buffer:
+        for update in decompressed_buffer:
             weight = update.data_size / total_data_size
             for name, param in update.update_data.items():
                 if name not in aggregated:
                     aggregated[name] = torch.zeros_like(param, dtype=torch.float32)
-                # Ensure both tensors are float type for aggregation
                 if param.dtype != torch.float32:
                     param = param.float()
                 aggregated[name] = aggregated[name] + (param * weight)
@@ -227,7 +265,6 @@ class SyncFedAvg(FederatedProtocol):
         else:
             for name, param in aggregated.items():
                 if name in self.global_model:
-                    # Ensure compatible types
                     if self.global_model[name].dtype != torch.float32:
                         self.global_model[name] = self.global_model[name].float()
                     self.global_model[name] = self.global_model[name] + param
@@ -238,13 +275,11 @@ class SyncFedAvg(FederatedProtocol):
         self.metrics.metrics['aggregations_performed'] += 1
         round_time = time.time() - self.round_start_time
         self.metrics.metrics['average_round_time'] = (
-            0.9 * self.metrics.metrics['average_round_time'] + 0.1 * round_time
+                0.9 * self.metrics.metrics['average_round_time'] + 0.1 * round_time
         )
 
-        # Log before clearing buffer
         num_clients = len(self.round_buffer)
 
-        # Prepare for next round
         self.current_round += 1
         self.model_version = self.current_round
         self.round_buffer.clear()
@@ -262,8 +297,27 @@ class AsyncFedAvg(FederatedProtocol):
         self.aggregation_thread = threading.Thread(target=self._continuous_aggregation, daemon=True)
         self.aggregation_thread.start()
 
+        self.compression = kwargs.get('compression', None)
+
+        # Initialize compressor
+        if self.compression == "topk":
+            self.compressor = TopKCompressor(kwargs.get('k', 100))
+        elif self.compression == "signsgd":
+            self.compressor = SignSGDCompressor()
+        elif self.compression == "qsgd":
+            self.compressor = QSGDCompressor(kwargs.get('num_bits', 8))
+        else:
+            self.compressor = None
+
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
         with self._lock:
+            # Optional compression before storing
+            if hasattr(self, "compressor") and self.compressor is not None:
+                compressed_update = {}
+                for name, delta in update.update_data.items():
+                    comp, shape = self.compressor.compress(delta)
+                    compressed_update[name] = (comp, shape)
+                update.update_data = compressed_update
             current_version = self.model_version
             staleness = current_version - update.model_version
 
@@ -337,8 +391,28 @@ class FedBuff(FederatedProtocol):
         self.aggregation_thread = threading.Thread(target=self._buffer_aggregation, daemon=True)
         self.aggregation_thread.start()
 
+        self.compression = kwargs.get('compression', None)
+
+        # Initialize compressor
+        if self.compression == "topk":
+            self.compressor = TopKCompressor(kwargs.get('k', 100))
+        elif self.compression == "signsgd":
+            self.compressor = SignSGDCompressor()
+        elif self.compression == "qsgd":
+            self.compressor = QSGDCompressor(kwargs.get('num_bits', 8))
+        else:
+            self.compressor = None
+
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
         with self._lock:
+            # Optional compression before storing
+            if hasattr(self, "compressor") and self.compressor is not None:
+                compressed_update = {}
+                for name, delta in update.update_data.items():
+                    comp, shape = self.compressor.compress(delta)
+                    compressed_update[name] = (comp, shape)
+                update.update_data = compressed_update
+
             current_version = self.model_version
             staleness = current_version - update.model_version
 
@@ -370,6 +444,29 @@ class FedBuff(FederatedProtocol):
         """Aggregate buffered updates with server learning rate and clipping"""
         if not self.update_buffer:
             return
+
+        # Decompress if needed
+        decompressed_buffer = []
+        for update in self.update_buffer:
+            if hasattr(self, "compressor") and self.compressor is not None:
+                decompressed_update = {}
+                for name, (comp, shape) in update.update_data.items():
+                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                update.update_data = decompressed_update
+            decompressed_buffer.append(update)
+
+        # Calculate weighted average
+        total_data_size = sum(u.data_size for u in decompressed_buffer)
+        aggregated = {}
+
+        for update in decompressed_buffer:
+            weight = update.data_size / total_data_size
+            for name, param in update.update_data.items():
+                if name not in aggregated:
+                    aggregated[name] = torch.zeros_like(param, dtype=torch.float32)
+                if param.dtype != torch.float32:
+                    param = param.float()
+                aggregated[name] = aggregated[name] + (param * weight)
 
         updates_to_aggregate = list(self.update_buffer)
         self.update_buffer.clear()
@@ -426,7 +523,20 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         # Adaptive features
         self.adaptive_weighting = kwargs.get('adaptive_weighting', True)
         self.momentum = kwargs.get('momentum', 0.9)
-        self.compression_ratio = kwargs.get('compression_ratio', 0.5)  # Important!
+
+        self.compression = kwargs.get('compression', None)
+        self.compression_ratio = kwargs.get('compression_ratio', 0.5)
+
+        # Initialize compressor
+        if self.compression == "topk":
+            self.compressor = TopKCompressor(kwargs.get('k', 100))
+        elif self.compression == "signsgd":
+            self.compressor = SignSGDCompressor()
+        elif self.compression == "qsgd":
+            self.compressor = QSGDCompressor(kwargs.get('num_bits', 8))
+        else:
+            self.compressor = None
+            self.compression_ratio = kwargs.get('compression_ratio', 0.5)
 
         # Internal state
         self.update_buffer = deque()
@@ -438,8 +548,17 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         self.aggregation_thread = threading.Thread(target=self._smart_aggregation, daemon=True)
         self.aggregation_thread.start()
 
+
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
         with self._lock:
+            # Optional compression before storing
+            if hasattr(self, "compressor") and self.compressor is not None:
+                compressed_update = {}
+                for name, delta in update.update_data.items():
+                    comp, shape = self.compressor.compress(delta)
+                    compressed_update[name] = (comp, shape)
+                update.update_data = compressed_update
+
             current_version = self.model_version
             staleness = current_version - update.model_version
 
@@ -448,13 +567,16 @@ class ImprovedAsyncProtocol(FederatedProtocol):
 
             if staleness > effective_max_staleness:
                 self.metrics.update_communication(
-                    self.calculate_update_size(update.update_data) * self.compression_ratio,
+                    self.calculate_update_size(update.update_data),
                     accepted=False
                 )
                 return False, current_version
 
             # Apply compression (simulate by reducing communication cost)
-            compressed_size = self.calculate_update_size(update.update_data) * self.compression_ratio
+            if self.compressor is not None:
+                compressed_size = self.calculate_update_size(update.update_data)
+            else:
+                compressed_size = self.calculate_update_size(update.update_data) * self.compression_ratio
 
             update.staleness = staleness
             self.update_buffer.append(update)
@@ -506,6 +628,28 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         if not self.update_buffer:
             return
 
+        # Decompress if needed
+        decompressed_buffer = []
+        for update in self.update_buffer:
+            if hasattr(self, "compressor") and self.compressor is not None:
+                decompressed_update = {}
+                for name, (comp, shape) in update.update_data.items():
+                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                update.update_data = decompressed_update
+            decompressed_buffer.append(update)
+
+        # Calculate weighted average
+        total_data_size = sum(u.data_size for u in decompressed_buffer)
+        aggregated = {}
+
+        for update in decompressed_buffer:
+            weight = update.data_size / total_data_size
+            for name, param in update.update_data.items():
+                if name not in aggregated:
+                    aggregated[name] = torch.zeros_like(param, dtype=torch.float32)
+                if param.dtype != torch.float32:
+                    param = param.float()
+                aggregated[name] = aggregated[name] + (param * weight)
         # Select best updates (quality-based selection)
         num_to_aggregate = min(len(self.update_buffer), self.max_buffer_size)
 
@@ -633,6 +777,14 @@ class Scaffold(FederatedProtocol):
 
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
         with self._lock:
+            # Optional compression before storing
+            if hasattr(self, "compressor") and self.compressor is not None:
+                compressed_update = {}
+                for name, delta in update.update_data.items():
+                    comp, shape = self.compressor.compress(delta)
+                    compressed_update[name] = (comp, shape)
+                update.update_data = compressed_update
+
             # Add to round buffer
             self.round_buffer.append(update)
 
@@ -651,6 +803,29 @@ class Scaffold(FederatedProtocol):
         """FedAvg + control variate correction"""
         if not self.round_buffer:
             return
+
+        # Decompress if needed
+        decompressed_buffer = []
+        for update in self.round_buffer:
+            if hasattr(self, "compressor") and self.compressor is not None:
+                decompressed_update = {}
+                for name, (comp, shape) in update.update_data.items():
+                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                update.update_data = decompressed_update
+            decompressed_buffer.append(update)
+
+        # Calculate weighted average
+        total_data_size = sum(u.data_size for u in decompressed_buffer)
+        aggregated = {}
+
+        for update in decompressed_buffer:
+            weight = update.data_size / total_data_size
+            for name, param in update.update_data.items():
+                if name not in aggregated:
+                    aggregated[name] = torch.zeros_like(param, dtype=torch.float32)
+                if param.dtype != torch.float32:
+                    param = param.float()
+                aggregated[name] = aggregated[name] + (param * weight)
 
         total_data_size = sum(u.data_size for u in self.round_buffer)
         aggregated = {}
