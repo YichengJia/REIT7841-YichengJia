@@ -248,13 +248,13 @@ def main():
         protocols_config[f"improved_async_{name}"] = cfg
 
     experiment_config = {
-        'num_clients': 20,
-        'samples_per_client': 100,
+        'num_clients': 50,
+        'samples_per_client': 300,
         'input_dim': 12,
         'hidden_dim': 32,
         'num_classes': 3,
         'heterogeneity': 0.5,
-        'duration': 120
+        'duration': 360
     }
 
     results = compare_protocols(protocols_config, experiment_config)

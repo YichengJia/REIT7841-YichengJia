@@ -153,19 +153,36 @@ class FederatedProtocol(ABC):
             return None
 
     def calculate_update_size(self, update_data: Dict[str, torch.Tensor]) -> float:
-        """Calculate update size in MB"""
+        """Calculate update size in MB, supporting nested tuples/lists from compressors."""
+
+        def _bytes_of(obj) -> int:
+            # numpy array
+            if isinstance(obj, np.ndarray):
+                return obj.nbytes
+            # torch tensor
+            if isinstance(obj, torch.Tensor):
+                return obj.numel() * obj.element_size()
+            # nested containers (tuple/list)
+            if isinstance(obj, (tuple, list)):
+                return sum(_bytes_of(x) for x in obj)
+            # numeric scalars (python or numpy) — approximate as 8 bytes
+            if isinstance(obj, (float, int, np.floating, np.integer)):
+                return 8
+            # shapes or other metadata we ignore (e.g., torch.Size)
+            return 0
+
         total_bytes = 0
-        for tensor in update_data.values():
-            if tensor is None:
+        for value in update_data.values():
+            if value is None:
                 continue
-            if isinstance(tensor, tuple):  # compressed (comp, shape)
-                comp, shape = tensor
-                if isinstance(comp, np.ndarray):
-                    total_bytes += comp.nbytes
-                elif isinstance(comp, torch.Tensor):
-                    total_bytes += comp.numel() * comp.element_size()
-            else:  # raw tensor
-                total_bytes += tensor.numel() * tensor.element_size()
+            # compressed form: (comp, shape)
+            if isinstance(value, tuple) and len(value) == 2:
+                comp, shape = value
+                total_bytes += _bytes_of(comp)
+            else:
+                # raw tensor (uncompressed)
+                total_bytes += _bytes_of(value)
+
         return total_bytes / (1024 * 1024)
 
     def shutdown(self):
@@ -239,7 +256,8 @@ class SyncFedAvg(FederatedProtocol):
         for update in self.round_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, (comp, shape) in update.update_data.items():
+                for name, compressed in update.update_data.items():
+                    comp, shape = compressed
                     decompressed_update[name] = self.compressor.decompress(comp, shape)
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
@@ -450,7 +468,8 @@ class FedBuff(FederatedProtocol):
         for update in self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, (comp, shape) in update.update_data.items():
+                for name, compressed in update.update_data.items():
+                    comp, shape = compressed
                     decompressed_update[name] = self.compressor.decompress(comp, shape)
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
@@ -633,7 +652,8 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         for update in self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, (comp, shape) in update.update_data.items():
+                for name, compressed in update.update_data.items():
+                    comp, shape = compressed
                     decompressed_update[name] = self.compressor.decompress(comp, shape)
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
@@ -809,7 +829,8 @@ class Scaffold(FederatedProtocol):
         for update in self.round_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, (comp, shape) in update.update_data.items():
+                for name, compressed in update.update_data.items():
+                    comp, shape = compressed
                     decompressed_update[name] = self.compressor.decompress(comp, shape)
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
@@ -872,16 +893,24 @@ class Scaffold(FederatedProtocol):
 
 # Factory function to create protocols
 def create_protocol(protocol_name: str, num_clients: int, **kwargs) -> FederatedProtocol:
-    """Factory function to create protocol instances"""
+    """Factory function to create protocol instances with backward-compatible aliasing"""
+    name = protocol_name.lower().strip()
+
+    # Backward-compatible aliasing:
+    # - Accept plain "improved"
+    # - Accept any variant starting with "improved" (e.g., "improved_async_topk")
+    if name.startswith('improved'):
+        name = 'improved_async'
+
     protocols = {
         'fedavg': SyncFedAvg,
         'fedasync': AsyncFedAvg,
         'fedbuff': FedBuff,
         'improved_async': ImprovedAsyncProtocol,
-        'scaffold': Scaffold
+        'scaffold': Scaffold,
     }
 
-    if protocol_name.lower() not in protocols:
+    if name not in protocols:
         raise ValueError(f"Unknown protocol: {protocol_name}")
 
-    return protocols[protocol_name.lower()](num_clients, **kwargs)
+    return protocols[name](num_clients, **kwargs)
