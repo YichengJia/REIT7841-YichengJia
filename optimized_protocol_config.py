@@ -89,11 +89,11 @@ def quick_test_improved_config():
 
     # Generate test data
     client_datasets, test_dataset = generate_federated_data(
-        num_clients=3,
-        samples_per_client=30,
-        input_dim=8,
-        num_classes=2,
-        heterogeneity=0.3
+        num_clients=50,
+        samples_per_client=500,
+        input_dim=12,
+        num_classes=3,
+        heterogeneity=0.5
     )
 
     model_config = {'input_dim': 8, 'hidden_dim': 16, 'output_dim': 2}

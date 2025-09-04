@@ -123,6 +123,8 @@ class FederatedProtocol(ABC):
         self.server_lr = kwargs.get('server_lr', 0.2)  # generic default
         self.gradient_clip = kwargs.get('gradient_clip', 2.0)
         self.compressor = None  # will be set by protocols that support compression
+        self.round_participation_rate = kwargs.get('participation_rate', 0.5)
+
 
         # Protocol-specific parameters
         self.configure(**kwargs)
@@ -258,9 +260,14 @@ class SyncFedAvg(FederatedProtocol):
         for update in self.round_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, compressed in update.update_data.items():
-                    comp, shape = compressed
-                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                for name, maybe_compressed in update.update_data.items():
+                    # Only decompress if value is a (comp, shape) two-tuple
+                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
+                        comp, shape = maybe_compressed
+                        decompressed_update[name] = self.compressor.decompress(comp, shape)
+                    else:
+                        # Already a tensor (or plain value) — keep as is
+                        decompressed_update[name] = maybe_compressed
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
@@ -470,9 +477,14 @@ class FedBuff(FederatedProtocol):
         for update in self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, compressed in update.update_data.items():
-                    comp, shape = compressed
-                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                for name, maybe_compressed in update.update_data.items():
+                    # Only decompress if value is a (comp, shape) two-tuple
+                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
+                        comp, shape = maybe_compressed
+                        decompressed_update[name] = self.compressor.decompress(comp, shape)
+                    else:
+                        # Already a tensor (or plain value) — keep as is
+                        decompressed_update[name] = maybe_compressed
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
@@ -658,9 +670,14 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         for update in self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, compressed in update.update_data.items():
-                    comp, shape = compressed
-                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                for name, maybe_compressed in update.update_data.items():
+                    # Only decompress if value is a (comp, shape) two-tuple
+                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
+                        comp, shape = maybe_compressed
+                        decompressed_update[name] = self.compressor.decompress(comp, shape)
+                    else:
+                        # Already a tensor (or plain value) — keep as is
+                        decompressed_update[name] = maybe_compressed
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
@@ -793,6 +810,9 @@ class Scaffold(FederatedProtocol):
         self.learning_rate = kwargs.get('learning_rate', 1.0)
         self.max_round_time = kwargs.get('max_round_time', 30.0)
 
+        # NEW: participation rate for sync rounds (default 50%)
+        self.round_participation_rate = kwargs.get('participation_rate', 0.5)
+
         # Optional compression support (align with other protocols)
         self.compression = kwargs.get('compression', None)
         if self.compression == "topk":
@@ -808,6 +828,7 @@ class Scaffold(FederatedProtocol):
         self.c_global = {}
         self.client_controls = defaultdict(dict)
 
+        # Round state
         self.current_round = 0
         self.round_buffer = []
         self.round_start_time = time.time()
@@ -822,15 +843,16 @@ class Scaffold(FederatedProtocol):
                     compressed_update[name] = (comp, shape)
                 update.update_data = compressed_update
 
-            # Add to round buffer
+            # Buffer the update
             self.round_buffer.append(update)
 
             # Record communication
             update_size = self.calculate_update_size(update.update_data)
             self.metrics.update_communication(update_size, accepted=True)
 
-            timeout_reached = (time.time() - self.round_start_time) >= self.max_round_time
+            # Aggregate when enough clients joined or timeout
             min_clients = max(2, int(self.num_clients * self.round_participation_rate))
+            timeout_reached = (time.time() - self.round_start_time) >= self.max_round_time
 
             if len(self.round_buffer) >= min_clients or (timeout_reached and len(self.round_buffer) >= 2):
                 self.aggregate_updates()
@@ -848,9 +870,14 @@ class Scaffold(FederatedProtocol):
         for update in self.round_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, compressed in update.update_data.items():
-                    comp, shape = compressed
-                    decompressed_update[name] = self.compressor.decompress(comp, shape)
+                for name, maybe_compressed in update.update_data.items():
+                    # Only decompress if value is a (comp, shape) two-tuple
+                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
+                        comp, shape = maybe_compressed
+                        decompressed_update[name] = self.compressor.decompress(comp, shape)
+                    else:
+                        # Already a tensor (or plain value) — keep as is
+                        decompressed_update[name] = maybe_compressed
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 

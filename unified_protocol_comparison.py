@@ -249,7 +249,7 @@ def main():
 
     experiment_config = {
         'num_clients': 50,
-        'samples_per_client': 300,
+        'samples_per_client': 500,
         'input_dim': 12,
         'hidden_dim': 32,
         'num_classes': 3,
