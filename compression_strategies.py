@@ -39,14 +39,47 @@ class TopKCompressor(Compressor):
 
 
 class SignSGDCompressor(Compressor):
-    """SignSGD compression"""
+    """True 1-bit sign compression with magnitude scaling."""
+    def __init__(self, scale: str = "median"):
+        # scale ∈ {"mean","median"}; median is more robust
+        self.scale = scale
+
     def compress(self, tensor: torch.Tensor):
-        sign = torch.sign(tensor).cpu().numpy()
-        return sign, tensor.shape
+        # Flatten and compute scale
+        flat = tensor.view(-1).detach()
+        if flat.numel() == 0:
+            packed = np.frombuffer(b"", dtype=np.uint8)
+            meta = (flat.numel(), 0.0)
+            return (packed, meta), tensor.shape
+
+        if self.scale == "median":
+            mag = flat.abs().median().item()
+        else:
+            mag = flat.abs().mean().item()
+        # Avoid zero scaling
+        if mag == 0.0:
+            mag = 1e-8
+
+        # Pack signs into bits: 1 -> 1, -1/0 -> 0
+        # (You can choose >=0 as 1 to match your direction convention)
+        bits = (flat >= 0).to(torch.uint8).cpu().numpy()  # 0/1 per element
+        packed = np.packbits(bits)  # uint8 array, length = ceil(N/8)
+
+        # meta carries (num_elements, magnitude)
+        meta = (int(flat.numel()), float(mag))
+        return (packed, meta), tensor.shape
 
     def decompress(self, compressed, shape):
-        sign = compressed
-        return torch.tensor(sign, dtype=torch.float32).view(shape)
+        packed, meta = compressed
+        n, mag = meta
+        if n == 0:
+            return torch.zeros(shape, dtype=torch.float32)
+
+        # Unpack bits back to 0/1 then map to {-1,+1}
+        bits = np.unpackbits(packed)[:n]
+        signs = (bits * 2 - 1).astype(np.int8)  # 0->-1, 1->+1
+        out = torch.from_numpy(signs).to(torch.float32) * float(mag)
+        return out.view(shape)
 
 
 class QSGDCompressor(Compressor):

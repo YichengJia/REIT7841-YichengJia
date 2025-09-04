@@ -118,6 +118,12 @@ class FederatedProtocol(ABC):
         self.running = True
         self._lock = threading.RLock()
 
+        # ---- Common defaults to avoid attribute errors across protocols ----
+        self.compression = kwargs.get('compression', None)
+        self.server_lr = kwargs.get('server_lr', 0.2)  # generic default
+        self.gradient_clip = kwargs.get('gradient_clip', 2.0)
+        self.compressor = None  # will be set by protocols that support compression
+
         # Protocol-specific parameters
         self.configure(**kwargs)
 
@@ -152,38 +158,32 @@ class FederatedProtocol(ABC):
                 return copy.deepcopy(self.global_model)
             return None
 
-    def calculate_update_size(self, update_data: Dict[str, torch.Tensor]) -> float:
-        """Calculate update size in MB, supporting nested tuples/lists from compressors."""
+    def calculate_update_size(self, update_data: Dict[str, Any]) -> float:
+        """Calculate update size in MB, robust to nested tuple/list from compressors."""
 
         def _bytes_of(obj) -> int:
-            # numpy array
             if isinstance(obj, np.ndarray):
                 return obj.nbytes
-            # torch tensor
             if isinstance(obj, torch.Tensor):
                 return obj.numel() * obj.element_size()
-            # nested containers (tuple/list)
             if isinstance(obj, (tuple, list)):
                 return sum(_bytes_of(x) for x in obj)
-            # numeric scalars (python or numpy) — approximate as 8 bytes
             if isinstance(obj, (float, int, np.floating, np.integer)):
-                return 8
-            # shapes or other metadata we ignore (e.g., torch.Size)
+                return 8  # approximate for scalars
             return 0
 
         total_bytes = 0
-        for value in update_data.values():
-            if value is None:
+        for v in update_data.values():
+            if v is None:
                 continue
             # compressed form: (comp, shape)
-            if isinstance(value, tuple) and len(value) == 2:
-                comp, shape = value
+            if isinstance(v, tuple) and len(v) == 2:
+                comp, _shape = v
                 total_bytes += _bytes_of(comp)
-            else:
-                # raw tensor (uncompressed)
-                total_bytes += _bytes_of(value)
+            else:  # raw tensor
+                total_bytes += _bytes_of(v)
 
-        return total_bytes / (1024 * 1024)
+        return total_bytes / (1024.0 * 1024.0)
 
     def shutdown(self):
         """Shutdown protocol"""
@@ -239,8 +239,10 @@ class SyncFedAvg(FederatedProtocol):
             self.metrics.update_communication(update_size, accepted=True)
 
             # Check if we should aggregate
+            timeout_reached = (time.time() - self.round_start_time) >= self.max_round_time
             min_clients = max(2, int(self.num_clients * self.round_participation_rate))
-            if len(self.round_buffer) >= min_clients:
+
+            if len(self.round_buffer) >= min_clients or (timeout_reached and len(self.round_buffer) >= 2):
                 self.aggregate_updates()
                 return True, self.current_round + 1
 
@@ -543,10 +545,8 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         self.adaptive_weighting = kwargs.get('adaptive_weighting', True)
         self.momentum = kwargs.get('momentum', 0.9)
 
+        # Compression selection
         self.compression = kwargs.get('compression', None)
-        self.compression_ratio = kwargs.get('compression_ratio', 0.5)
-
-        # Initialize compressor
         if self.compression == "topk":
             self.compressor = TopKCompressor(kwargs.get('k', 100))
         elif self.compression == "signsgd":
@@ -555,7 +555,17 @@ class ImprovedAsyncProtocol(FederatedProtocol):
             self.compressor = QSGDCompressor(kwargs.get('num_bits', 8))
         else:
             self.compressor = None
-            self.compression_ratio = kwargs.get('compression_ratio', 0.5)
+
+        # ---- MUST set these BEFORE any background thread starts ----
+        self.server_lr = kwargs.get(
+            'server_lr',
+            0.1 if self.compression == "signsgd" else 0.2
+        )
+        self.gradient_clip = kwargs.get(
+            'gradient_clip',
+            1.0 if self.compression == "signsgd" else 2.0
+        )
+        # -----------------------------------------------------------
 
         # Internal state
         self.update_buffer = deque()
@@ -563,10 +573,9 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         self.client_contribution_scores = defaultdict(lambda: 1.0)
         self.network_health = 0.5
 
-        # Start aggregation thread
+        # Start aggregation thread (after all attributes are set)
         self.aggregation_thread = threading.Thread(target=self._smart_aggregation, daemon=True)
         self.aggregation_thread.start()
-
 
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
         with self._lock:
@@ -591,11 +600,8 @@ class ImprovedAsyncProtocol(FederatedProtocol):
                 )
                 return False, current_version
 
-            # Apply compression (simulate by reducing communication cost)
-            if self.compressor is not None:
-                compressed_size = self.calculate_update_size(update.update_data)
-            else:
-                compressed_size = self.calculate_update_size(update.update_data) * self.compression_ratio
+            compressed_size = self.calculate_update_size(update.update_data)
+            self.metrics.update_communication(compressed_size, accepted=True)
 
             update.staleness = staleness
             self.update_buffer.append(update)
@@ -730,7 +736,7 @@ class ImprovedAsyncProtocol(FederatedProtocol):
 
             # Clip to prevent gradient explosion
             for name in aggregated_delta:
-                aggregated_delta[name] = torch.clamp(aggregated_delta[name], -5.0, 5.0)
+                aggregated_delta[name] = torch.clamp(aggregated_delta[name], -self.gradient_clip, self.gradient_clip)
 
             # Apply delta to global model
             if self.global_model is None:
@@ -787,6 +793,17 @@ class Scaffold(FederatedProtocol):
         self.learning_rate = kwargs.get('learning_rate', 1.0)
         self.max_round_time = kwargs.get('max_round_time', 30.0)
 
+        # Optional compression support (align with other protocols)
+        self.compression = kwargs.get('compression', None)
+        if self.compression == "topk":
+            self.compressor = TopKCompressor(kwargs.get('k', 100))
+        elif self.compression == "signsgd":
+            self.compressor = SignSGDCompressor()
+        elif self.compression == "qsgd":
+            self.compressor = QSGDCompressor(kwargs.get('num_bits', 8))
+        else:
+            self.compressor = None
+
         # Global control variate (same shape as model)
         self.c_global = {}
         self.client_controls = defaultdict(dict)
@@ -812,8 +829,10 @@ class Scaffold(FederatedProtocol):
             update_size = self.calculate_update_size(update.update_data)
             self.metrics.update_communication(update_size, accepted=True)
 
-            min_clients = max(2, int(self.num_clients * 0.5))
-            if len(self.round_buffer) >= min_clients:
+            timeout_reached = (time.time() - self.round_start_time) >= self.max_round_time
+            min_clients = max(2, int(self.num_clients * self.round_participation_rate))
+
+            if len(self.round_buffer) >= min_clients or (timeout_reached and len(self.round_buffer) >= 2):
                 self.aggregate_updates()
                 return True, self.current_round + 1
 
