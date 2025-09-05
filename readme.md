@@ -180,17 +180,32 @@ For large-scale experiments on HPC clusters:
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=fedlearn_improved
+#SBATCH --job-name=fedlearn_test
 #SBATCH --time=08:00:00
+#SBATCH --partition=general
 #SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
+#SBATCH --account=a_css
 
-module load python/3.8
-module load cuda/11.6
+module load anaconda3
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate fedlearn
 
-python unified_protocol_comparison.py --clients 50 --duration 600
-python intelligent_parameter_tuning.py --method bayesian
+export MPLBACKEND=Agg
+export PYTHONUNBUFFERED=1
+
+python -u unified_protocol_comparison.py
+# Set matplotlib backend to avoid display issues
+export MPLBACKEND=Agg
+
+# Add debugging
+export PYTHONUNBUFFERED=1
+
+# Run with explicit python path
+python -u unified_protocol_comparison.py
+python -u intelligent_parameter_tuning.py
 ```
 
 ##  Visualization
