@@ -24,7 +24,7 @@ This repository contains the implementation of a novel **Improved Asynchronous F
 3. **Integrated Gradient Compression**: Seamless integration of TopK, SignSGD, and QSGD compression techniques
 4. **Heterogeneity Adaptation**: Handles computational, network, and data heterogeneity simultaneously
 
-## 📊 Performance Results
+## Performance Results
 
 Our protocol demonstrates superior performance across multiple metrics:
 
@@ -132,7 +132,7 @@ federated-robotic-learning/
     └── supplementary_materials/
 ```
 
-## 🔬 Experimental Configuration
+##  Experimental Configuration
 
 ### Protocol Configurations
 
@@ -238,33 +238,6 @@ def select_compression(bandwidth_mbps):
     else:
         return {'compression': 'signsgd'}
 ```
-
-##  Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@mastersthesis{jia2025federated,
-  title={Federated Asynchronous Communication Protocol and Fine-tuning 
-         for Distributed Heterogeneous Robotic Systems},
-  author={Jia, Yicheng},
-  year={2025},
-  school={The University of Queensland},
-  type={Master's Thesis}
-}
-```
-
-##  Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Areas for Contribution
-
-- [ ] Additional compression methods (PowerSGD, FetchSGD)
-- [ ] Byzantine-resilient aggregation
-- [ ] Privacy-preserving mechanisms (Differential Privacy)
-- [ ] Support for more robotic datasets
-- [ ] Real-world deployment tools
 
 ##  License
 
