@@ -95,14 +95,9 @@ protocol.set_global_model(model.state_dict())
 # Run main protocol comparison
 python unified_protocol_comparison.py
 
-# Run parameter tuning (Bayesian optimization)
-python intelligent_parameter_tuning.py --method bayesian --iterations 30
+# Run parameter tuning 
+python intelligent_parameter_tuning.py
 
-# Generate visualizations
-python visualization_results.py
-
-# Quick test with different configurations
-python test_protocols.py --config high_accuracy --compression signsgd
 ```
 
 ##  Project Structure
@@ -113,9 +108,9 @@ federated-robotic-learning/
 ├── federated_protocol_framework.py    # Core protocol implementations
 ├── compression_strategies.py          # Gradient compression methods
 ├── unified_protocol_comparison.py     # Experimental comparison framework
-├── intelligent_parameter_tuning.py    # Bayesian optimization for parameters
-├── optimized_protocol_config.py      # Configuration management
-├── visualization_results.py          # Result visualization tools
+├── intelligent_parameter_tuning.py    # Parameters tuning
+├── optimized_protocol_config.py       # Configuration management
+├── visualization_results.py           # Result visualization tools(remain to be done)
 │
 ├── experiments/                      # Experiment scripts and configs
 │   ├── run_baseline.sh
