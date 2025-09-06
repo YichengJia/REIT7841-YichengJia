@@ -24,7 +24,7 @@ This repository contains the implementation of a novel **Improved Asynchronous F
 3. **Integrated Gradient Compression**: Seamless integration of TopK, SignSGD, and QSGD compression techniques
 4. **Heterogeneity Adaptation**: Handles computational, network, and data heterogeneity simultaneously
 
-## 📊 Performance Results
+## Performance Results
 
 Our protocol demonstrates superior performance across multiple metrics:
 
@@ -95,14 +95,9 @@ protocol.set_global_model(model.state_dict())
 # Run main protocol comparison
 python unified_protocol_comparison.py
 
-# Run parameter tuning (Bayesian optimization)
-python intelligent_parameter_tuning.py --method bayesian --iterations 30
+# Run parameter tuning 
+python intelligent_parameter_tuning.py
 
-# Generate visualizations
-python visualization_results.py
-
-# Quick test with different configurations
-python test_protocols.py --config high_accuracy --compression signsgd
 ```
 
 ##  Project Structure
@@ -113,9 +108,9 @@ federated-robotic-learning/
 ├── federated_protocol_framework.py    # Core protocol implementations
 ├── compression_strategies.py          # Gradient compression methods
 ├── unified_protocol_comparison.py     # Experimental comparison framework
-├── intelligent_parameter_tuning.py    # Bayesian optimization for parameters
-├── optimized_protocol_config.py      # Configuration management
-├── visualization_results.py          # Result visualization tools
+├── intelligent_parameter_tuning.py    # Parameters tuning
+├── optimized_protocol_config.py       # Configuration management
+├── visualization_results.py           # Result visualization tools(remain to be done)
 │
 ├── experiments/                      # Experiment scripts and configs
 │   ├── run_baseline.sh
@@ -132,7 +127,7 @@ federated-robotic-learning/
     └── supplementary_materials/
 ```
 
-## 🔬 Experimental Configuration
+##  Experimental Configuration
 
 ### Protocol Configurations
 
@@ -180,17 +175,32 @@ For large-scale experiments on HPC clusters:
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=fedlearn_improved
+#SBATCH --job-name=fedlearn_test
 #SBATCH --time=08:00:00
+#SBATCH --partition=general
 #SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
+#SBATCH --account=a_css
 
-module load python/3.8
-module load cuda/11.6
+module load anaconda3
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate fedlearn
 
-python unified_protocol_comparison.py --clients 50 --duration 600
-python intelligent_parameter_tuning.py --method bayesian
+export MPLBACKEND=Agg
+export PYTHONUNBUFFERED=1
+
+python -u unified_protocol_comparison.py
+# Set matplotlib backend to avoid display issues
+export MPLBACKEND=Agg
+
+# Add debugging
+export PYTHONUNBUFFERED=1
+
+# Run with explicit python path
+python -u unified_protocol_comparison.py
+python -u intelligent_parameter_tuning.py
 ```
 
 ##  Visualization
@@ -238,33 +248,6 @@ def select_compression(bandwidth_mbps):
     else:
         return {'compression': 'signsgd'}
 ```
-
-##  Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@mastersthesis{jia2025federated,
-  title={Federated Asynchronous Communication Protocol and Fine-tuning 
-         for Distributed Heterogeneous Robotic Systems},
-  author={Jia, Yicheng},
-  year={2025},
-  school={The University of Queensland},
-  type={Master's Thesis}
-}
-```
-
-##  Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Areas for Contribution
-
-- [ ] Additional compression methods (PowerSGD, FetchSGD)
-- [ ] Byzantine-resilient aggregation
-- [ ] Privacy-preserving mechanisms (Differential Privacy)
-- [ ] Support for more robotic datasets
-- [ ] Real-world deployment tools
 
 ##  License
 
