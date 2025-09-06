@@ -268,5 +268,40 @@ def main():
               f"Aggregations={metrics['aggregations_performed']}")
 
 
+from metrics import macro_f1, corpus_bleu
+def evaluate_with_intent_and_explanation(model, dataloader, device, id2label=None):
+    """
+    Returns: intent_f1, explanation_bleu, intent_preds, intent_golds
+    - If you don't have a text explanation head, we synthesize a simple template
+      from predicted and gold labels to make BLEU comparable across settings.
+    """
+    model.eval()
+    intent_preds, intent_golds = [], []
+    hyp_expl_tokens, ref_expl_tokens = [], []
+
+    with torch.no_grad():
+        for xb, yb in dataloader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            logits = model(xb)
+            pred = torch.argmax(logits, dim=-1)
+            intent_preds.extend(pred.cpu().tolist())
+            intent_golds.extend(yb.cpu().tolist())
+
+            # --- synthetic explanations (placeholder) ---
+            # You can replace the two lines below with your own text head outputs.
+            def explain(lbl_id):  # tiny template for demo
+                name = id2label[lbl_id] if id2label else f"class_{lbl_id}"
+                return f"the intent is {name}"
+
+            hyp_expl = [explain(i) for i in pred.cpu().tolist()]
+            ref_expl = [explain(i) for i in yb.cpu().tolist()]
+            hyp_expl_tokens += [s.split() for s in hyp_expl]
+            ref_expl_tokens += [s.split() for s in ref_expl]
+
+    intent_f1 = macro_f1(intent_preds, intent_golds)
+    expl_bleu = corpus_bleu(ref_expl_tokens, hyp_expl_tokens)  # 0~1
+    return intent_f1, expl_bleu, intent_preds, intent_golds
+
 if __name__ == "__main__":
     main()

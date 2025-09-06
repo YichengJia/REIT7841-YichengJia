@@ -160,32 +160,45 @@ class FederatedProtocol(ABC):
                 return copy.deepcopy(self.global_model)
             return None
 
-    def calculate_update_size(self, update_data: Dict[str, Any]) -> float:
-        """Calculate update size in MB, robust to nested tuple/list from compressors."""
-
-        def _bytes_of(obj) -> int:
-            if isinstance(obj, np.ndarray):
-                return obj.nbytes
-            if isinstance(obj, torch.Tensor):
-                return obj.numel() * obj.element_size()
-            if isinstance(obj, (tuple, list)):
-                return sum(_bytes_of(x) for x in obj)
-            if isinstance(obj, (float, int, np.floating, np.integer)):
-                return 8  # approximate for scalars
-            return 0
-
+    def calculate_update_size(self, update_data: Dict[str, torch.Tensor]) -> float:
+        """Calculate update size in MB (compressed payload only if present)."""
         total_bytes = 0
-        for v in update_data.values():
-            if v is None:
+        for tensor_or_tuple in update_data.values():
+            if tensor_or_tuple is None:
                 continue
-            # compressed form: (comp, shape)
-            if isinstance(v, tuple) and len(v) == 2:
-                comp, _shape = v
-                total_bytes += _bytes_of(comp)
-            else:  # raw tensor
-                total_bytes += _bytes_of(v)
-
-        return total_bytes / (1024.0 * 1024.0)
+            # compressed path: (compressed_payload, shape)
+            if isinstance(tensor_or_tuple, tuple) and len(tensor_or_tuple) == 2:
+                comp, _ = tensor_or_tuple
+                # TopK: comp = (indices, values)
+                if isinstance(comp, tuple) and len(comp) == 2:
+                    indices, values = comp
+                    if isinstance(indices, np.ndarray):
+                        total_bytes += indices.nbytes
+                    elif isinstance(indices, torch.Tensor):
+                        total_bytes += indices.numel() * indices.element_size()
+                    if isinstance(values, np.ndarray):
+                        total_bytes += values.nbytes
+                    elif isinstance(values, torch.Tensor):
+                        total_bytes += values.numel() * values.element_size()
+                # SignSGD: comp = (sign_array, avg_magnitude)
+                elif isinstance(comp, tuple) and len(comp) == 2 and isinstance(comp[1], (float, np.floating)):
+                    sign_arr, _ = comp
+                    if isinstance(sign_arr, np.ndarray):
+                        total_bytes += sign_arr.nbytes + 4  # 4 bytes for avg magnitude
+                    elif isinstance(sign_arr, torch.Tensor):
+                        total_bytes += sign_arr.numel() // 8 + 4
+                # QSGD or others: best-effort size
+                else:
+                    if isinstance(comp, np.ndarray):
+                        total_bytes += comp.nbytes
+                    elif isinstance(comp, torch.Tensor):
+                        total_bytes += comp.numel() * comp.element_size()
+            else:
+                # raw tensor
+                t = tensor_or_tuple
+                if isinstance(t, torch.Tensor):
+                    total_bytes += t.numel() * t.element_size()
+        return total_bytes / (1024 * 1024)
 
     def shutdown(self):
         """Shutdown protocol"""
@@ -257,17 +270,16 @@ class SyncFedAvg(FederatedProtocol):
 
         # Decompress if needed
         decompressed_buffer = []
-        for update in self.round_buffer:
+        for update in self.round_buffer if hasattr(self, "round_buffer") else self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, maybe_compressed in update.update_data.items():
-                    # Only decompress if value is a (comp, shape) two-tuple
-                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
-                        comp, shape = maybe_compressed
+                for name, item in update.update_data.items():
+                    # Accept both raw tensors and (compressed, shape) tuples
+                    if isinstance(item, tuple) and len(item) == 2:
+                        comp, shape = item
                         decompressed_update[name] = self.compressor.decompress(comp, shape)
                     else:
-                        # Already a tensor (or plain value) — keep as is
-                        decompressed_update[name] = maybe_compressed
+                        decompressed_update[name] = item  # already tensor
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
@@ -474,17 +486,16 @@ class FedBuff(FederatedProtocol):
 
         # Decompress if needed
         decompressed_buffer = []
-        for update in self.update_buffer:
+        for update in self.round_buffer if hasattr(self, "round_buffer") else self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, maybe_compressed in update.update_data.items():
-                    # Only decompress if value is a (comp, shape) two-tuple
-                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
-                        comp, shape = maybe_compressed
+                for name, item in update.update_data.items():
+                    # Accept both raw tensors and (compressed, shape) tuples
+                    if isinstance(item, tuple) and len(item) == 2:
+                        comp, shape = item
                         decompressed_update[name] = self.compressor.decompress(comp, shape)
                     else:
-                        # Already a tensor (or plain value) — keep as is
-                        decompressed_update[name] = maybe_compressed
+                        decompressed_update[name] = item  # already tensor
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
@@ -568,7 +579,6 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         else:
             self.compressor = None
 
-        # ---- MUST set these BEFORE any background thread starts ----
         self.server_lr = kwargs.get(
             'server_lr',
             0.1 if self.compression == "signsgd" else 0.2
@@ -577,7 +587,6 @@ class ImprovedAsyncProtocol(FederatedProtocol):
             'gradient_clip',
             1.0 if self.compression == "signsgd" else 2.0
         )
-        # -----------------------------------------------------------
 
         # Internal state
         self.update_buffer = deque()
@@ -667,17 +676,16 @@ class ImprovedAsyncProtocol(FederatedProtocol):
 
         # Decompress if needed
         decompressed_buffer = []
-        for update in self.update_buffer:
+        for update in self.round_buffer if hasattr(self, "round_buffer") else self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, maybe_compressed in update.update_data.items():
-                    # Only decompress if value is a (comp, shape) two-tuple
-                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
-                        comp, shape = maybe_compressed
+                for name, item in update.update_data.items():
+                    # Accept both raw tensors and (compressed, shape) tuples
+                    if isinstance(item, tuple) and len(item) == 2:
+                        comp, shape = item
                         decompressed_update[name] = self.compressor.decompress(comp, shape)
                     else:
-                        # Already a tensor (or plain value) — keep as is
-                        decompressed_update[name] = maybe_compressed
+                        decompressed_update[name] = item  # already tensor
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
@@ -867,17 +875,16 @@ class Scaffold(FederatedProtocol):
 
         # Decompress if needed
         decompressed_buffer = []
-        for update in self.round_buffer:
+        for update in self.round_buffer if hasattr(self, "round_buffer") else self.update_buffer:
             if hasattr(self, "compressor") and self.compressor is not None:
                 decompressed_update = {}
-                for name, maybe_compressed in update.update_data.items():
-                    # Only decompress if value is a (comp, shape) two-tuple
-                    if isinstance(maybe_compressed, tuple) and len(maybe_compressed) == 2:
-                        comp, shape = maybe_compressed
+                for name, item in update.update_data.items():
+                    # Accept both raw tensors and (compressed, shape) tuples
+                    if isinstance(item, tuple) and len(item) == 2:
+                        comp, shape = item
                         decompressed_update[name] = self.compressor.decompress(comp, shape)
                     else:
-                        # Already a tensor (or plain value) — keep as is
-                        decompressed_update[name] = maybe_compressed
+                        decompressed_update[name] = item  # already tensor
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
