@@ -86,20 +86,34 @@ def main():
             # train rounds
             for r in range(ROUNDS):
                 for cid, ds in enumerate(client_datasets):
-                    # local train -> get delta
-                    local_model = SimpleNN(input_dim=INPUT_DIM, hidden_dim=64, output_dim=NUM_CLASSES).to(DEVICE)
+                    # local train -> compute delta on CPU to match train_client
+                    local_model = SimpleNN(input_dim=INPUT_DIM, hidden_dim=64, output_dim=NUM_CLASSES)
                     # pull
                     state = protocol.get_global_model()
                     if state:
                         local_model.load_state_dict(state, strict=False)
 
-                    delta_state, local_loss, n_samples = train_client(
-                        local_model, ds, device=DEVICE, epochs=LOCAL_EPOCHS, batch_size=BATCH_SIZE
+                    updated_state, local_loss, n_samples = train_client(
+                        local_model, ds, epochs=LOCAL_EPOCHS, lr=0.01
                     )
+
+                    # compute parameter delta = updated - pulled_global
+                    update_dict = {}
+                    if state:
+                        for name, p_new in updated_state.items():
+                            # ignore BatchNorm counters
+                            if name in state and 'num_batches_tracked' not in name:
+                                update_dict[name] = (p_new.float() - state[name].float())
+
+                    else:
+                        # first round: treat weights as delta from zeros
+                        for name, p_new in updated_state.items():
+                            if 'num_batches_tracked' not in name:
+                                update_dict[name] = p_new.float()
 
                     update = ClientUpdate(
                         client_id=str(cid),
-                        update_data=delta_state,  # server will compress if compressor is set
+                        update_data=update_dict,  # pass deltas (server may compress if a compressor is configured)
                         model_version=protocol.model_version,
                         local_loss=float(local_loss),
                         data_size=int(n_samples),
@@ -148,7 +162,7 @@ def main():
                 best_k, best = k, v
         print(f"{proto:12s}  best_k={best_k:>4}  score={best['score']:.4f}  "
               f"Intent-F1={best['intent_f1']:.4f}  BLEU={best['explanation_bleu']:.4f}  "
-              f"Comm={best['communication_mb']:.2f}MB  Agg={best['aggregations']}")
+              f"Comm={best['communication_mb']:.4f}MB  Agg={best['aggregations']}")
 
     with open("joint_protocol_topk_results.json", "w") as f:
         json.dump(results, f, indent=2)

@@ -25,6 +25,21 @@ from federated_protocol_framework import (
 )
 from optimized_protocol_config import generate_all_configs
 
+import os, random, numpy as np, torch
+
+def set_seed(seed: int = 42, deterministic: bool = False) -> None:
+    """Seed Python, NumPy, and PyTorch (CPU & CUDA) for reproducibility."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        # Make cuDNN deterministic (slower but reproducible)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 # -----------------------------
 # Simple Model Definition
@@ -41,6 +56,8 @@ class SimpleNN(nn.Module):
         self.dropout = nn.Dropout(0.2)
 
     def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
         x = self.relu(self.bn1(self.fc1(x)))
         x = self.dropout(x)
         x = self.relu(self.bn2(self.fc2(x)))
@@ -165,6 +182,12 @@ def compare_protocols(protocols_config: Dict, experiment_config: Dict) -> Dict:
         heterogeneity=experiment_config['heterogeneity']
     )
 
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=max(32, len(test_dataset) // 10),
+        shuffle=False
+    )
+
     model_config = {
         'input_dim': experiment_config['input_dim'],
         'hidden_dim': experiment_config['hidden_dim'],
@@ -217,13 +240,24 @@ def compare_protocols(protocols_config: Dict, experiment_config: Dict) -> Dict:
         eval_model.load_state_dict(final_model_state)
         accuracy, loss = evaluate_model(eval_model, test_dataset)
 
+        # Intent-F1 & Explanation-BLEU (synthetic explanation baseline)
+        intent_f1, expl_bleu, _, _ = evaluate_with_intent_and_explanation(
+            eval_model,
+            test_dataset,
+            device="cpu",
+            id2label={i: f"intent_{i}" for i in range(experiment_config['num_classes'])}
+        )
+
         metrics = protocol.metrics.get_summary()
         metrics['final_accuracy'] = accuracy
+        metrics['intent_f1'] = round(intent_f1, 4)
+        metrics['explanation_bleu'] = round(expl_bleu, 4)
         results[protocol_name] = metrics
 
         protocol.shutdown()
         print(f"\nResults for {protocol_name}:")
-        print(f"  Accuracy: {accuracy:.4f}, Loss: {loss:.4f}")
+        print(f"  Accuracy: {accuracy:.4f}, Loss: {loss:.4f}, "
+              f"Intent-F1: {intent_f1:.4f}, BLEU: {expl_bleu:.4f}")
 
     return results
 
@@ -269,39 +303,103 @@ def main():
 
 
 from metrics import macro_f1, corpus_bleu
-def evaluate_with_intent_and_explanation(model, dataloader, device, id2label=None):
+def evaluate_with_intent_and_explanation(model, data_or_loader, device="cpu", id2label=None):
     """
-    Returns: intent_f1, explanation_bleu, intent_preds, intent_golds
-    - If you don't have a text explanation head, we synthesize a simple template
-      from predicted and gold labels to make BLEU comparable across settings.
+    Evaluate intent classification F1 (macro) and explanation BLEU.
+
+    Args:
+        model: torch.nn.Module with a forward(x) -> logits of shape [N, num_classes].
+               Optionally may expose an explanation head/method; if absent, we synthesize text.
+        data_or_loader: a Dataset or a DataLoader yielding (x, y) batches.
+        device: "cpu" or "cuda".
+        id2label: Optional[Dict[int, str]]. If None, we'll fallback to "intent_{i}".
+
+    Returns:
+        intent_f1: float
+        explanation_bleu: float
+        intent_preds: List[int]
+        intent_golds: List[int]
     """
     model.eval()
-    intent_preds, intent_golds = [], []
-    hyp_expl_tokens, ref_expl_tokens = [], []
+    model.to(device)
+
+    # Accept both Dataset and DataLoader
+    if isinstance(data_or_loader, DataLoader):
+        loader = data_or_loader
+    else:
+        loader = DataLoader(data_or_loader, batch_size=512, shuffle=False)
+
+    all_preds, all_golds = [], []
+    refs, hyps = [], []
+
+    # Helper: safe label string
+    def _lab(idx: int) -> str:
+        if id2label is not None and idx in id2label:
+            return str(id2label[idx])
+        return f"intent_{idx}"
+
+    # If the model can generate explanations, prefer that path
+    # We assume a signature like: model.explain(xb, preds) -> List[str]
+    has_explain = hasattr(model, "explain") and callable(getattr(model, "explain"))
 
     with torch.no_grad():
-        for xb, yb in dataloader:
-            xb = xb.to(device)
+        for xb, yb in loader:
+            # Ensure 2D tensor for BatchNorm/Linear: [N, C]
+            if isinstance(xb, torch.Tensor):
+                if xb.dim() == 1:
+                    xb = xb.unsqueeze(0)  # [C] -> [1, C]
+                elif xb.dim() > 2:
+                    xb = xb.view(xb.size(0), -1)  # flatten to [N, C]
+            else:
+                # If not a tensor, try to convert
+                xb = torch.tensor(xb)
+
+            xb = xb.to(device).float()
             yb = yb.to(device)
+
             logits = model(xb)
-            pred = torch.argmax(logits, dim=-1)
-            intent_preds.extend(pred.cpu().tolist())
-            intent_golds.extend(yb.cpu().tolist())
+            preds = torch.argmax(logits, dim=1)
 
-            # --- synthetic explanations (placeholder) ---
-            # You can replace the two lines below with your own text head outputs.
-            def explain(lbl_id):  # tiny template for demo
-                name = id2label[lbl_id] if id2label else f"class_{lbl_id}"
-                return f"the intent is {name}"
+            all_preds.extend(preds.detach().cpu().tolist())
+            all_golds.extend(yb.detach().cpu().tolist())
 
-            hyp_expl = [explain(i) for i in pred.cpu().tolist()]
-            ref_expl = [explain(i) for i in yb.cpu().tolist()]
-            hyp_expl_tokens += [s.split() for s in hyp_expl]
-            ref_expl_tokens += [s.split() for s in ref_expl]
+            # ---- Build references/hypotheses for BLEU ----
+            batch_preds = preds.detach().cpu().tolist()
+            batch_golds = yb.detach().cpu().tolist()
 
-    intent_f1 = macro_f1(intent_preds, intent_golds)
-    expl_bleu = corpus_bleu(ref_expl_tokens, hyp_expl_tokens)  # 0~1
-    return intent_f1, expl_bleu, intent_preds, intent_golds
+            if has_explain:
+                # Use model-provided explanations if available
+                try:
+                    batch_hyps = model.explain(xb, preds)  # List[str] with len == batch size
+                except Exception:
+                    # Fallback to synthesized explanations if custom head fails
+                    batch_hyps = [f"predicted {_lab(p)} because features indicate {_lab(p)}"
+                                  for p in batch_preds]
+            else:
+                # Synthesize simple, comparable explanations
+                batch_hyps = [f"predicted {_lab(p)} because features indicate {_lab(p)}"
+                              for p in batch_preds]
+
+            batch_refs = [f"ground truth is {_lab(g)} due to underlying pattern {_lab(g)}"
+                          for g in batch_golds]
+
+            # Keep lengths aligned
+            assert len(batch_refs) == len(batch_hyps)
+            refs.extend(batch_refs)
+            hyps.extend(batch_hyps)
+            # ------------------------------------------------
+
+    # Compute metrics AFTER the loop
+    intent_f1 = macro_f1(all_preds, all_golds)
+
+    # BLEU over synthesized or model-provided explanations
+    # Your `corpus_bleu` in metrics.py is expected to accept two equal-length lists of strings.
+    if len(refs) == len(hyps) and len(refs) > 0:
+        explanation_bleu = corpus_bleu(refs, hyps)
+    else:
+        explanation_bleu = 0.0
+
+    return intent_f1, explanation_bleu, all_preds, all_golds
 
 if __name__ == "__main__":
     main()
