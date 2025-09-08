@@ -66,9 +66,13 @@ class ProtocolMetrics:
             'timestamps': []
         }
 
-    def update_communication(self, data_size_mb: float, accepted: bool = True):
-        """Update communication metrics"""
-        self.metrics['total_data_transmitted_mb'] += data_size_mb
+    def update_communication(self, data_size_bytes: float, accepted: bool = True):
+        """
+        Update communication metrics.
+        The input must be BYTES (from calculate_update_size). We convert to MB here.
+        """
+        mb = float(data_size_bytes) / (1024.0 * 1024.0)
+        self.metrics['total_data_transmitted_mb'] += mb
         self.metrics['total_updates_sent'] += 1
         if accepted:
             self.metrics['total_updates_accepted'] += 1
@@ -160,32 +164,39 @@ class FederatedProtocol(ABC):
                 return copy.deepcopy(self.global_model)
             return None
 
-    def calculate_update_size(self, update_data: Dict[str, Any]) -> float:
-        """Calculate update size in MB, robust to nested tuple/list from compressors."""
+    def calculate_update_size(self, update_data: Dict[str, Any]) -> int:
+        """
+        Return size in bytes of the update_data in its transported (compressed) form.
+        Handles:
+          - TopK: ((indices, values), shape)
+          - SignSGD: (sign_bits_like_np, magnitude_float32)
+          - QSGD: (qvals_like_np, norm_float32, scale_float32)
+          - Uncompressed: torch.Tensor
+        """
+        comp = getattr(self, "compression", None)
+        total = 0
 
-        def _bytes_of(obj) -> int:
-            if isinstance(obj, np.ndarray):
-                return obj.nbytes
-            if isinstance(obj, torch.Tensor):
-                return obj.numel() * obj.element_size()
-            if isinstance(obj, (tuple, list)):
-                return sum(_bytes_of(x) for x in obj)
-            if isinstance(obj, (float, int, np.floating, np.integer)):
-                return 8  # approximate for scalars
-            return 0
-
-        total_bytes = 0
-        for v in update_data.values():
-            if v is None:
-                continue
-            # compressed form: (comp, shape)
+        for _, v in update_data.items():
+            # compressed tuple ((...), shape)
             if isinstance(v, tuple) and len(v) == 2:
-                comp, _shape = v
-                total_bytes += _bytes_of(comp)
-            else:  # raw tensor
-                total_bytes += _bytes_of(v)
-
-        return total_bytes / (1024.0 * 1024.0)
+                compressed, shape = v
+                if comp == "topk" and isinstance(compressed, tuple) and len(compressed) == 2:
+                    indices, values = compressed
+                    total += getattr(indices, "nbytes", 0) + getattr(values, "nbytes", 0)
+                elif comp == "signsgd" and isinstance(compressed, tuple) and len(compressed) == 2:
+                    signs, magnitude = compressed
+                    total += getattr(signs, "nbytes", 0) + 4  # one float32
+                elif comp == "qsgd" and isinstance(compressed, tuple) and len(compressed) == 3:
+                    qvals, norm, scale = compressed
+                    total += getattr(qvals, "nbytes", 0) + 8  # two float32
+                else:
+                    # Unknown compressed structure; ignore or log
+                    pass
+            else:
+                # Uncompressed tensor fallback
+                if isinstance(v, torch.Tensor):
+                    total += v.numel() * v.element_size()
+        return total
 
     def shutdown(self):
         """Shutdown protocol"""
@@ -345,6 +356,7 @@ class AsyncFedAvg(FederatedProtocol):
                     comp, shape = self.compressor.compress(delta)
                     compressed_update[name] = (comp, shape)
                 update.update_data = compressed_update
+
             current_version = self.model_version
             staleness = current_version - update.model_version
 
@@ -356,18 +368,21 @@ class AsyncFedAvg(FederatedProtocol):
                 )
                 return False, current_version
 
-            # Accept and apply immediately
-            update.staleness = staleness
-            self._apply_update(update)
-
+            # Count accepted traffic ONCE (compressed form), then apply
             update_size = self.calculate_update_size(update.update_data)
             self.metrics.update_communication(update_size, accepted=True)
 
+            update.staleness = staleness
+            self._apply_update(update)
+
             return True, current_version
 
-    def _apply_update(self, update: ClientUpdate):
-        """Apply single update to global model (decompress if needed)."""
-        # Decompress if compression is enabled
+    def _apply_update(self, update: "ClientUpdate"):
+        """
+        Apply a single update to the global model.
+        Decompress if compression is enabled, then apply a staleness-aware LR.
+        """
+        # Decompress if needed
         update_data = update.update_data
         if hasattr(self, "compressor") and self.compressor is not None:
             decompressed = {}
@@ -379,11 +394,10 @@ class AsyncFedAvg(FederatedProtocol):
                     decompressed[name] = maybe_compressed
             update_data = decompressed
 
-        # Staleness-aware learning rate
         staleness_factor = 1.0 / (1.0 + update.staleness)
-        effective_lr = self.learning_rate * staleness_factor
+        effective_lr = float(getattr(self, "learning_rate", 0.1)) * staleness_factor
 
-        # Apply delta to global model
+        # Initialize or update
         if self.global_model is None:
             self.global_model = {}
             for name, param in update_data.items():
@@ -402,13 +416,7 @@ class AsyncFedAvg(FederatedProtocol):
                     self.global_model[name] = param * effective_lr
 
         self.model_version += 1
-        self.metrics.metrics['aggregations_performed'] += 1
-
-        # Update staleness metrics
-        self.metrics.metrics['average_staleness'] = (
-            0.9 * self.metrics.metrics['average_staleness'] +
-            0.1 * update.staleness
-        )
+        self.metrics.metrics["aggregations_performed"] += 1
 
     def _continuous_aggregation(self):
         """Placeholder for continuous aggregation (immediate in basic FedAsync)"""
@@ -602,9 +610,16 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         self.aggregation_thread.start()
 
     def receive_update(self, update: ClientUpdate) -> Tuple[bool, int]:
+        """
+        Receive a client update:
+          - Optionally compress deltas (server-side).
+          - Count communication exactly once in compressed form.
+          - Drop overly stale updates using an adaptive threshold.
+          - Push accepted updates to the buffer without double counting.
+        """
         with self._lock:
             # Optional compression before storing
-            if hasattr(self, "compressor") and self.compressor is not None:
+            if getattr(self, "compressor", None) is not None:
                 compressed_update = {}
                 for name, delta in update.update_data.items():
                     comp, shape = self.compressor.compress(delta)
@@ -612,25 +627,31 @@ class ImprovedAsyncProtocol(FederatedProtocol):
                 update.update_data = compressed_update
 
             current_version = self.model_version
-            staleness = current_version - update.model_version
+            # Non-negative staleness guard
+            staleness = max(0, current_version - update.model_version)
 
             # Adaptive staleness threshold based on network health
             effective_max_staleness = self.max_staleness * (1.5 if self.network_health < 0.3 else 1.0)
 
+            # Compute transported size in compressed form (robust)
+            try:
+                transported_bytes = self.calculate_update_size(update.update_data)
+            except Exception:
+                transported_bytes = 0
+
+            # Drop too-stale updates: count as rejected traffic once
             if staleness > effective_max_staleness:
-                self.metrics.update_communication(
-                    self.calculate_update_size(update.update_data),
-                    accepted=False
-                )
+                self.metrics.update_communication(transported_bytes, accepted=False)
+                # Update network health given staleness observation
+                self._update_network_health(staleness)
                 return False, current_version
 
-            compressed_size = self.calculate_update_size(update.update_data)
-            self.metrics.update_communication(compressed_size, accepted=True)
+            # Accept: count as accepted traffic once (do not double-count later)
+            self.metrics.update_communication(transported_bytes, accepted=True)
 
+            # Store metadata and enqueue
             update.staleness = staleness
             self.update_buffer.append(update)
-
-            self.metrics.update_communication(compressed_size, accepted=True)
 
             # Update network health
             self._update_network_health(staleness)

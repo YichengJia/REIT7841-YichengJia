@@ -5,7 +5,7 @@ Implements gradient compression strategies for federated learning.
 
 import torch
 import numpy as np
-
+from typing import Tuple, Dict
 
 class Compressor:
     """Base class for compressors"""
@@ -16,26 +16,66 @@ class Compressor:
         raise NotImplementedError
 
 
-class TopKCompressor(Compressor):
-    """Top-K sparsification"""
+class TopKCompressor:
+    """
+    Top-K compressor that returns a compact representation:
+    ((indices:int32 ndarray, values:float32 ndarray), original_shape)
+    Decompress restores a dense tensor with zeros for non-topk positions.
+    """
+
     def __init__(self, k: int):
-        self.k = k
+        self.k = int(k)
+        self.compression_stats = {
+            "total_elements": 0,
+            "compressed_elements": 0,
+            "theoretical_ratio": 0.0
+        }
+        self.debug = False  # set True to enable diagnostic prints
 
-    def compress(self, tensor: torch.Tensor):
-        tensor_flat = tensor.view(-1)
-        k = min(self.k, tensor_flat.numel())
+    def compress(self, tensor: torch.Tensor) -> Tuple[Tuple[np.ndarray, np.ndarray], torch.Size]:
+        """Return ((indices_np, values_np), original_shape)."""
+        # Safe flatten (reshape is robust to non-contiguous)
+        tensor_flat = tensor.reshape(-1)
+        num_elements = tensor_flat.numel()
 
-        # Get top-k indices
-        _, indices = torch.topk(tensor_flat.abs(), k, sorted=False)
-        values = tensor_flat[indices]
+        effective_k = min(max(self.k, 0), num_elements)
+        if num_elements == 0 or effective_k == 0:
+            return (np.array([], dtype=np.int32), np.array([], dtype=np.float32)), tensor.shape
 
-        return (indices.cpu().numpy(), values.cpu().numpy()), tensor.shape
+        if effective_k > num_elements * 0.3 and self.debug:
+            print(f"[TopK] k={effective_k} is {effective_k/num_elements:.1%} of tensor, compression may be inefficient")
 
-    def decompress(self, compressed, shape):
-        indices, values = compressed
-        tensor_flat = torch.zeros(np.prod(shape), dtype=torch.float32)
-        tensor_flat[indices] = torch.tensor(values, dtype=torch.float32)
-        return tensor_flat.view(shape)
+        # Select by magnitude
+        values_topk, indices_topk = torch.topk(tensor_flat.abs(), effective_k, sorted=False)
+        actual_values = tensor_flat[indices_topk]
+
+        indices_np = indices_topk.detach().cpu().numpy().astype(np.int32)
+        values_np = actual_values.detach().cpu().numpy().astype(np.float32)
+
+        # Update stats
+        self.compression_stats["total_elements"] += num_elements
+        self.compression_stats["compressed_elements"] += effective_k
+        self.compression_stats["theoretical_ratio"] = (num_elements / effective_k) if effective_k > 0 else 0.0
+
+        if self.debug:
+            ratio = (num_elements * 4) / float(indices_np.nbytes + values_np.nbytes + 1e-8)
+            print(f"[TopK] original={num_elements*4:.0f}B, compressed={indices_np.nbytes+values_np.nbytes:.0f}B, ratio={ratio:.2f}x")
+
+        return (indices_np, values_np), tensor.shape
+
+    def decompress(self, compressed: Tuple[np.ndarray, np.ndarray], shape: torch.Size, device: str = "cpu") -> torch.Tensor:
+        """Restore dense tensor with zeros elsewhere."""
+        indices_np, values_np = compressed
+        num_elements = int(np.prod(shape))
+        out = torch.zeros(num_elements, dtype=torch.float32, device=device)
+        if indices_np.size > 0:
+            idx = torch.from_numpy(indices_np).long().to(device)
+            val = torch.from_numpy(values_np).float().to(device)
+            out[idx] = val
+        return out.view(shape)
+
+    def get_stats(self) -> Dict:
+        return dict(self.compression_stats)
 
 
 class SignSGDCompressor(Compressor):
@@ -46,7 +86,7 @@ class SignSGDCompressor(Compressor):
 
     def compress(self, tensor: torch.Tensor):
         # Flatten and compute scale
-        flat = tensor.view(-1).detach()
+        flat = tensor.reshape(-1).detach()  # use reshape() for non-contiguous tensors
         if flat.numel() == 0:
             packed = np.frombuffer(b"", dtype=np.uint8)
             meta = (flat.numel(), 0.0)
@@ -61,7 +101,6 @@ class SignSGDCompressor(Compressor):
             mag = 1e-8
 
         # Pack signs into bits: 1 -> 1, -1/0 -> 0
-        # (You can choose >=0 as 1 to match your direction convention)
         bits = (flat >= 0).to(torch.uint8).cpu().numpy()  # 0/1 per element
         packed = np.packbits(bits)  # uint8 array, length = ceil(N/8)
 

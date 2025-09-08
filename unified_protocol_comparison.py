@@ -303,57 +303,45 @@ def main():
 
 
 from metrics import macro_f1, corpus_bleu
-def evaluate_with_intent_and_explanation(model, data_or_loader, device="cpu", id2label=None):
+from torch.utils.data import DataLoader
+
+def evaluate_with_intent_and_explanation(
+    model,
+    data_or_loader,
+    device: str = "cpu",
+    id2label=None,
+    num_classes: int = None
+):
     """
-    Evaluate intent classification F1 (macro) and explanation BLEU.
+    Evaluate intent macro-F1 and explanation BLEU.
 
-    Args:
-        model: torch.nn.Module with a forward(x) -> logits of shape [N, num_classes].
-               Optionally may expose an explanation head/method; if absent, we synthesize text.
-        data_or_loader: a Dataset or a DataLoader yielding (x, y) batches.
-        device: "cpu" or "cuda".
-        id2label: Optional[Dict[int, str]]. If None, we'll fallback to "intent_{i}".
-
-    Returns:
-        intent_f1: float
-        explanation_bleu: float
-        intent_preds: List[int]
-        intent_golds: List[int]
+    - If the model provides `explain(xb, preds)` -> List[str], we use that.
+    - Otherwise we synthesize minimal explanations as single-token labels ("intent_k"),
+      and compute BLEU-1, making BLEU correlate with label agreement rather than template wording.
     """
     model.eval()
     model.to(device)
 
-    # Accept both Dataset and DataLoader
-    if isinstance(data_or_loader, DataLoader):
-        loader = data_or_loader
-    else:
-        loader = DataLoader(data_or_loader, batch_size=512, shuffle=False)
+    loader = data_or_loader if isinstance(data_or_loader, DataLoader) \
+             else DataLoader(data_or_loader, batch_size=512, shuffle=False)
 
     all_preds, all_golds = [], []
-    refs, hyps = [], []
+    refs: list[str] = []
+    hyps: list[str] = []
 
-    # Helper: safe label string
     def _lab(idx: int) -> str:
         if id2label is not None and idx in id2label:
             return str(id2label[idx])
         return f"intent_{idx}"
 
-    # If the model can generate explanations, prefer that path
-    # We assume a signature like: model.explain(xb, preds) -> List[str]
     has_explain = hasattr(model, "explain") and callable(getattr(model, "explain"))
 
     with torch.no_grad():
         for xb, yb in loader:
-            # Ensure 2D tensor for BatchNorm/Linear: [N, C]
             if isinstance(xb, torch.Tensor):
-                if xb.dim() == 1:
-                    xb = xb.unsqueeze(0)  # [C] -> [1, C]
-                elif xb.dim() > 2:
-                    xb = xb.view(xb.size(0), -1)  # flatten to [N, C]
+                xb = xb if xb.dim() == 2 else xb.view(xb.size(0), -1)
             else:
-                # If not a tensor, try to convert
                 xb = torch.tensor(xb)
-
             xb = xb.to(device).float()
             yb = yb.to(device)
 
@@ -363,43 +351,26 @@ def evaluate_with_intent_and_explanation(model, data_or_loader, device="cpu", id
             all_preds.extend(preds.detach().cpu().tolist())
             all_golds.extend(yb.detach().cpu().tolist())
 
-            # ---- Build references/hypotheses for BLEU ----
-            batch_preds = preds.detach().cpu().tolist()
-            batch_golds = yb.detach().cpu().tolist()
+            # references / hypotheses for BLEU
+            batch_refs = [_lab(int(g)) for g in yb.detach().cpu().tolist()]
 
             if has_explain:
-                # Use model-provided explanations if available
                 try:
-                    batch_hyps = model.explain(xb, preds)  # List[str] with len == batch size
+                    batch_hyps = model.explain(xb, preds)  # List[str]
                 except Exception:
-                    # Fallback to synthesized explanations if custom head fails
-                    batch_hyps = [f"predicted {_lab(p)} because features indicate {_lab(p)}"
-                                  for p in batch_preds]
+                    # fallback to single-token label
+                    batch_hyps = [_lab(int(p)) for p in preds.detach().cpu().tolist()]
             else:
-                # Synthesize simple, comparable explanations
-                batch_hyps = [f"predicted {_lab(p)} because features indicate {_lab(p)}"
-                              for p in batch_preds]
+                batch_hyps = [_lab(int(p)) for p in preds.detach().cpu().tolist()]
 
-            batch_refs = [f"ground truth is {_lab(g)} due to underlying pattern {_lab(g)}"
-                          for g in batch_golds]
-
-            # Keep lengths aligned
-            assert len(batch_refs) == len(batch_hyps)
             refs.extend(batch_refs)
             hyps.extend(batch_hyps)
-            # ------------------------------------------------
 
-    # Compute metrics AFTER the loop
-    intent_f1 = macro_f1(all_preds, all_golds)
-
-    # BLEU over synthesized or model-provided explanations
-    # Your `corpus_bleu` in metrics.py is expected to accept two equal-length lists of strings.
-    if len(refs) == len(hyps) and len(refs) > 0:
-        explanation_bleu = corpus_bleu(refs, hyps)
-    else:
-        explanation_bleu = 0.0
-
+    intent_f1 = macro_f1(all_preds, all_golds, num_classes=num_classes)
+    # Use BLEU-1 to avoid higher-order n-gram sparsity without a real explainer
+    explanation_bleu = corpus_bleu(refs, hyps, max_n=1, smooth=True, lowercase=True)
     return intent_f1, explanation_bleu, all_preds, all_golds
+
 
 if __name__ == "__main__":
     main()

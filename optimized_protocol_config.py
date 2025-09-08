@@ -7,22 +7,22 @@ Better configuration for improved async protocol based on analysis
 BASE_SCENARIOS = {
     'high_accuracy': {
         'max_staleness': 10,
-        'min_buffer_size': 1,
-        'max_buffer_size': 3,
+        'min_buffer_size': 2,
+        'max_buffer_size': 4,
         'momentum': 0.95,
         'adaptive_weighting': True,
     },
     'balanced': {
         'max_staleness': 15,
-        'min_buffer_size': 2,
-        'max_buffer_size': 5,
+        'min_buffer_size': 3,
+        'max_buffer_size': 6,
         'momentum': 0.85,
         'adaptive_weighting': True,
     },
     'low_communication': {
         'max_staleness': 20,
-        'min_buffer_size': 3,
-        'max_buffer_size': 8,
+        'min_buffer_size': 5,
+        'max_buffer_size': 10,
         'momentum': 0.8,
         'adaptive_weighting': True,
     }
