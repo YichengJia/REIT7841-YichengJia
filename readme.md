@@ -141,7 +141,6 @@ federated-robotic-protocol/
 │   └── Thesis Draft.docx                 # Full thesis
 │
 └── Results
-├── optimal_improved_async_config.json
 └── joint_protocol_topk_results.json
 ```
 
