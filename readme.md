@@ -141,7 +141,7 @@ federated-robotic-protocol/
 │   └── Thesis Draft.docx                 # Full thesis
 │
 └── Results
-└── joint_protocol_topk_results.json
+│ ├── joint_protocol_topk_results.json
 ```
 
 ## Advanced Usage
