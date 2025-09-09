@@ -1,6 +1,6 @@
 # Federated Asynchronous Communication Protocol for Heterogeneous Robotic Systems
 
-## Project Structure
+Project Structure
 federated-robotic-protocol/
 │
 ├── Core Framework
