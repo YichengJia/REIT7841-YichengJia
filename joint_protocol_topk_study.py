@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from federated_protocol_framework import create_protocol, ClientUpdate
 from unified_protocol_comparison import SimpleNN, generate_federated_data, train_client, set_seed
 from unified_protocol_comparison import evaluate_with_intent_and_explanation
+from metrics import tri_objective_score
 
 PROTOCOLS = ["fedavg", "fedasync", "fedbuff", "scaffold", "improved_async"]
 TOPK_LIST = [None, 1, 10, 50, 100, 200, 500, 1000]
@@ -23,8 +24,18 @@ W_BLEU   = 0.2
 W_COMM   = 0.2
 
 def normalized_score(intent_f1, bleu, comm_mb, comm_ref):
-    comm_norm = max(0.0, 1.0 - comm_mb / max(comm_ref, 1e-9))
-    return W_INTENT * intent_f1 + W_BLEU * bleu + W_COMM * comm_norm
+    # keep BLEU influence through pseudo-accuracy blend for backwards compatibility
+    pseudo_acc = 0.5 * intent_f1 + 0.5 * bleu
+    return tri_objective_score(
+        accuracy=pseudo_acc,
+        communication_mb=comm_mb,
+        latency_sec=1.0,
+        comm_budget_mb=max(comm_ref, 1e-9),
+        latency_budget_sec=1.0,
+        w_acc=W_INTENT + W_BLEU,
+        w_comm=W_COMM,
+        w_lat=0.0,
+    )
 
 def main():
     set_seed(42)

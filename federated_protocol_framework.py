@@ -567,15 +567,59 @@ class FedBuff(FederatedProtocol):
 class ImprovedAsyncProtocol(FederatedProtocol):
     """Your improved asynchronous protocol with optimizations"""
 
+    @staticmethod
+    def _clip_int(value: float, lower: int, upper: int) -> int:
+        return max(lower, min(int(round(value)), upper))
+
+    def _apply_auto_scaling(self, kwargs: Dict[str, Any]):
+        """
+        Scale key protocol parameters with the number of clients.
+        This keeps behavior stable from tiny deployments to large simulations.
+        """
+        if not kwargs.get('auto_scale_params', False):
+            return
+
+        n = max(1, int(self.num_clients))
+
+        # Buffer sizes scale sub-linearly with client count, then are safely clipped.
+        base_min = self._clip_int(np.sqrt(n), 2, 64)
+        base_max = self._clip_int(2 * base_min, base_min + 1, 256)
+
+        # Staleness budget grows slowly with population size.
+        base_staleness = self._clip_int(4.0 + 2.5 * np.log2(n), 5, 128)
+
+        self.min_buffer_size = kwargs.get('min_buffer_size', base_min)
+        self.max_buffer_size = kwargs.get('max_buffer_size', base_max)
+        self.max_staleness = kwargs.get('max_staleness', base_staleness)
+
+        # Ensure valid order after overrides.
+        if self.max_buffer_size <= self.min_buffer_size:
+            self.max_buffer_size = self.min_buffer_size + 1
+
+        logger.info(
+            "ImprovedAsync auto-scaled params: n=%s, min_buffer=%s, max_buffer=%s, max_staleness=%s",
+            n,
+            self.min_buffer_size,
+            self.max_buffer_size,
+            self.max_staleness,
+        )
+
     def configure(self, **kwargs):
         # Core parameters
         self.max_staleness = kwargs.get('max_staleness', 20)
         self.min_buffer_size = kwargs.get('min_buffer_size', 3)
         self.max_buffer_size = kwargs.get('max_buffer_size', 8)
 
+        # Optional scale-aware override for cross-scenario robustness.
+        self._apply_auto_scaling(kwargs)
+
         # Adaptive features
         self.adaptive_weighting = kwargs.get('adaptive_weighting', True)
         self.momentum = kwargs.get('momentum', 0.9)
+
+        # Journal-friendly staleness weighting controls
+        self.staleness_mode = kwargs.get('staleness_mode', 'quadratic')
+        self.staleness_floor = float(kwargs.get('staleness_floor', 0.2))
 
         # Compression selection
         self.compression = kwargs.get('compression', None)
@@ -714,18 +758,8 @@ class ImprovedAsyncProtocol(FederatedProtocol):
                 update.update_data = decompressed_update
             decompressed_buffer.append(update)
 
-        # Calculate weighted average
-        total_data_size = sum(u.data_size for u in decompressed_buffer)
-        aggregated = {}
-
-        for update in decompressed_buffer:
-            weight = update.data_size / total_data_size
-            for name, param in update.update_data.items():
-                if name not in aggregated:
-                    aggregated[name] = torch.zeros_like(param, dtype=torch.float32)
-                if param.dtype != torch.float32:
-                    param = param.float()
-                aggregated[name] = aggregated[name] + (param * weight)
+        # NOTE: we intentionally skip immediate averaging over the full decompressed
+        # buffer and instead perform quality-aware selection below.
         # Select best updates (quality-based selection)
         num_to_aggregate = min(len(self.update_buffer), self.max_buffer_size)
 
@@ -812,10 +846,23 @@ class ImprovedAsyncProtocol(FederatedProtocol):
                                  if self._calculate_quality_score(u) > 0.7)
         self.metrics.metrics['high_quality_updates'] += high_quality_count
 
+    def _alpha_staleness(self, staleness: float) -> float:
+        """Staleness decay alpha(tau), configurable for paper ablations."""
+        tau = float(max(0.0, staleness))
+        denom = max(float(self.max_staleness), 1e-8)
+        base = max(float(self.staleness_floor), 1.0 - tau / denom)
+
+        if self.staleness_mode == 'linear':
+            return base
+        if self.staleness_mode == 'exp':
+            return max(float(self.staleness_floor), float(np.exp(-tau / denom)))
+        # default: quadratic decay
+        return base ** 2
+
     def _calculate_quality_score(self, update: ClientUpdate) -> float:
         """Calculate update quality score"""
-        # Staleness penalty
-        staleness_score = max(0.1, 1.0 - update.staleness / self.max_staleness)
+        # Staleness-aware quality component
+        staleness_score = self._alpha_staleness(update.staleness)
 
         # Loss improvement score
         loss_score = 1.0 / (1.0 + update.local_loss) if update.local_loss > 0 else 0.5
@@ -827,12 +874,18 @@ class ImprovedAsyncProtocol(FederatedProtocol):
         return 0.4 * staleness_score + 0.3 * loss_score + 0.3 * client_score
 
     def _calculate_weight(self, update: ClientUpdate) -> float:
-        """Calculate aggregation weight for update"""
+        """
+        Calculate aggregation weight for update.
+
+        Formal shape:
+          w_i = data_size_i * alpha(tau_i) * quality_i
+        where alpha(tau) is the configurable staleness decay.
+        """
         if not self.adaptive_weighting:
             return update.data_size
 
         quality_score = self._calculate_quality_score(update)
-        staleness_penalty = max(0.2, 1.0 - update.staleness / self.max_staleness) ** 2
+        staleness_penalty = self._alpha_staleness(update.staleness)
 
         return update.data_size * quality_score * staleness_penalty
 

@@ -127,7 +127,7 @@ class QSGDCompressor(Compressor):
         self.num_bits = num_bits
 
     def compress(self, tensor: torch.Tensor):
-        tensor_flat = tensor.view(-1)
+        tensor_flat = tensor.reshape(-1)
         norm = torch.norm(tensor_flat)
 
         if norm.item() == 0:
@@ -140,7 +140,7 @@ class QSGDCompressor(Compressor):
         quantized = torch.floor(scaled) + torch.bernoulli(probs)
         signs = torch.sign(tensor_flat)
 
-        values = (quantized * signs).cpu().numpy()
+        values = (quantized * signs).to(torch.float32).cpu().numpy()
         return (values, norm.item(), scale.item()), tensor.shape
 
     def decompress(self, compressed, shape):

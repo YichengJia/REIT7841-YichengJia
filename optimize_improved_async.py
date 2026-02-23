@@ -5,10 +5,12 @@ Find optimal parameters for improved async protocol
 
 import torch
 import numpy as np
+import time
 from federated_protocol_framework import create_protocol, ClientUpdate
 from unified_protocol_comparison import SimpleNN, generate_federated_data, train_client, evaluate_model, \
     evaluate_with_intent_and_explanation
 import json
+from metrics import tri_objective_score
 
 # Set seeds
 torch.manual_seed(42)
@@ -25,6 +27,7 @@ def test_configuration(config, client_datasets, test_dataset, model_config, num_
     Other keys: max_staleness, min_buffer_size, max_buffer_size, momentum, adaptive_weighting, etc.
     """
     protocol = create_protocol('improved_async', num_clients=len(client_datasets), **config)
+    start_time = time.time()
 
     # Set initial model
     initial_model = SimpleNN(**model_config)
@@ -78,6 +81,7 @@ def test_configuration(config, client_datasets, test_dataset, model_config, num_
         )
 
         metrics = protocol.metrics.get_summary()
+        elapsed_sec = float(time.time() - start_time)
         protocol.shutdown()
 
         return {
@@ -86,7 +90,14 @@ def test_configuration(config, client_datasets, test_dataset, model_config, num_
             'intent_f1': intent_f1,
             'bleu': expl_bleu,
             'aggregations': metrics['aggregations_performed'],
-            'communication_mb': metrics['total_data_transmitted_mb']
+            'communication_mb': metrics['total_data_transmitted_mb'],
+            'tri_objective': tri_objective_score(
+                accuracy=accuracy,
+                communication_mb=metrics['total_data_transmitted_mb'],
+                latency_sec=elapsed_sec,
+                comm_budget_mb=60.0,
+                latency_budget_sec=max(elapsed_sec, 1.0),
+            )
         }
 
     protocol.shutdown()
@@ -122,7 +133,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Top-K (light)
@@ -135,7 +147,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Top-K (medium)
@@ -148,7 +161,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Top-K (stronger)
@@ -161,7 +175,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # SignSGD
@@ -173,7 +188,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # QSGD (8-bit)
@@ -186,7 +202,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Larger buffer
@@ -199,7 +216,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 3,
                 'max_buffer_size': 6,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Frequent aggregation
@@ -212,7 +230,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 1,
                 'max_buffer_size': 2,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Lower momentum
@@ -225,7 +244,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 4,
                 'momentum': 0.7,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Balanced
@@ -238,7 +258,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 2,
                 'max_buffer_size': 5,
                 'momentum': 0.85,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         # Accuracy Focus (no compression)
@@ -250,7 +271,8 @@ def find_optimal_parameters():
                 'min_buffer_size': 1,
                 'max_buffer_size': 3,
                 'momentum': 0.95,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         }
     ]
@@ -372,7 +394,8 @@ def compare_with_baseline():
                 'min_buffer_size': 2,
                 'max_buffer_size': 3,
                 'momentum': 0.9,
-                'adaptive_weighting': True
+                'adaptive_weighting': True,
+                'staleness_mode': 'quadratic'
             }
         },
         'Improved (Optimized)': {

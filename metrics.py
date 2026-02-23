@@ -7,6 +7,38 @@ from collections import Counter, defaultdict
 
 TextOrTokens = Union[str, List[str]]
 
+
+def tri_objective_score(
+    accuracy: float,
+    communication_mb: float,
+    latency_sec: float,
+    comm_budget_mb: float,
+    latency_budget_sec: float,
+    w_acc: float = 0.6,
+    w_comm: float = 0.2,
+    w_lat: float = 0.2,
+) -> float:
+    """
+    Accuracy-Communication-Latency composite score in [0,1] (approximately).
+
+    score = w_acc * acc + w_comm * comm_term + w_lat * lat_term
+    where comm_term = max(0, 1 - comm / budget),
+          lat_term  = max(0, 1 - lat / budget).
+    """
+    comm_term = max(0.0, 1.0 - float(communication_mb) / max(float(comm_budget_mb), 1e-9))
+    lat_term = max(0.0, 1.0 - float(latency_sec) / max(float(latency_budget_sec), 1e-9))
+    return float(w_acc * float(accuracy) + w_comm * comm_term + w_lat * lat_term)
+
+
+def within_budgets(
+    communication_mb: float,
+    latency_sec: float,
+    comm_budget_mb: float,
+    latency_budget_sec: float,
+) -> bool:
+    """Return whether a run satisfies both communication and latency budgets."""
+    return float(communication_mb) <= float(comm_budget_mb) and float(latency_sec) <= float(latency_budget_sec)
+
 def macro_f1(preds: Sequence[int], golds: Sequence[int], num_classes: int = None) -> float:
     """
     Macro-F1 for multi-class classification.

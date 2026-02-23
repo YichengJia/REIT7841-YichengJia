@@ -23,6 +23,7 @@ A novel **Improved Asynchronous Federated Learning Protocol** specifically desig
 - **Extreme Compression**: 96% bandwidth reduction with SignSGD
 - **Asynchronous Operation**: Handles intermittent connections and network instability
 - **Adaptive Mechanisms**: Dynamic buffer management and staleness-aware aggregation
+- **Configurable Staleness Decay**: Linear / Quadratic / Exponential decay modes for ablation-friendly async weighting
 - **Multiple Compression Methods**: Supports TopK, SignSGD, and QSGD
 - **Comprehensive Metrics**: Intent-F1, Explanation-BLEU, and communication efficiency tracking
 

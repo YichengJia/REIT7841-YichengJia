@@ -70,6 +70,46 @@ def get_improved_config(scenario='balanced', compression=None):
     return config
 
 
+def get_scaled_improved_config(
+    num_clients: int,
+    scenario: str = 'balanced',
+    compression=None,
+    auto_scale_params: bool = True,
+):
+    """
+    Build improved-async config with optional scale-aware parameterization.
+
+    Notes:
+    - When auto_scale_params=True, protocol internals may override
+      max_staleness/min_buffer_size/max_buffer_size based on num_clients.
+    - Scenario/compression values remain useful defaults for momentum,
+      adaptive weighting, and compression strategy selection.
+    """
+    config = get_improved_config(scenario=scenario, compression=compression)
+    config['auto_scale_params'] = bool(auto_scale_params)
+    return config
+
+
+def generate_scale_sweep_configs(
+    client_sizes,
+    scenario: str = 'balanced',
+    compression=None,
+    staleness_mode: str = 'quadratic',
+):
+    """Build configs for cross-scale sweeps (n=10..10000 etc.)."""
+    out = {}
+    for n in client_sizes:
+        cfg = get_scaled_improved_config(
+            num_clients=int(n),
+            scenario=scenario,
+            compression=compression,
+            auto_scale_params=True,
+        )
+        cfg['staleness_mode'] = staleness_mode
+        out[f"n{int(n)}_{scenario}_{compression or 'none'}_{staleness_mode}"] = cfg
+    return out
+
+
 def quick_test_improved_config():
     """Quick test of generated configs"""
     from federated_protocol_framework import create_protocol
