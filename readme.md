@@ -74,7 +74,6 @@ The code supports reporting results under explicit constrained objectives:
 ---
 
 ## 4. Repository Structure
-
 ```text
 .
 ├── federated_protocol_framework.py      # Protocol implementations + factory
@@ -86,3 +85,67 @@ The code supports reporting results under explicit constrained objectives:
 ├── optimize_improved_async.py           # Improved-async optimization helper
 ├── optimized_protocol_config.py         # Scenario configs + scale sweep helpers
 └── readme.md
+```
+
+---
+
+## 5. Installation
+
+```
+python -m venv venv
+source venv/bin/activate
+pip install torch torchvision numpy scikit-learn matplotlib
+```
+---
+
+## 6. Quick Start
+
+### 6.1 Main comparison
+```
+python unified_protocol_comparison.py
+```
+
+### 6.2 Parameter tuning
+```
+python intelligent_parameter_tuning.py
+```
+
+### 6.3 Protocol × Top-K analysis
+```
+python joint_protocol_topk_study.py
+```
+
+---
+
+## 7. Journal-Oriented Evaluation
+In experiment_config (main comparison runner), set:
+- comm_budget_mb
+- latency_budget_sec
+- include_autoscale_variants (optional)
+
+The runner outputs:  
+- final_accuracy
+- total_data_transmitted_mb
+- elapsed_sec
+- tri_objective_score
+- within_budget
+
+Improved async ablation knobs
+- staleness_mode: linear | quadratic | exp
+- staleness_floor: lower bound of staleness decay
+- auto_scale_params: scale-aware defaults for large/small client counts
+
+Scale-sweep config helper
+Use generate_scale_sweep_configs(...) in optimized_protocol_config.py for experiments like:
+n = [10, 50, 200, 500, 1000, 10000].
+
+---
+
+## 8. Reproducibility Notes
+- Set random seeds for Python/NumPy/PyTorch.
+- Keep training budgets comparable across protocols.
+- Report both raw metrics and tri-objective score.
+- Include budget feasibility (within_budget) in summary tables.
+
+## 9. Citation
+If you use this code in research, please cite your thesis/paper version and include commit hash/version for reproducibility.
