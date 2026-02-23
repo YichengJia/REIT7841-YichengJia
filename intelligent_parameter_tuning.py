@@ -17,6 +17,7 @@ from unified_protocol_comparison import (
     SimpleNN, generate_federated_data,
     train_client, evaluate_model
 )
+from metrics import tri_objective_score
 
 
 # Set seeds
@@ -98,6 +99,7 @@ def run_experiment_with_config(config, num_clients=10, samples_per_client=100, d
     eval_model.load_state_dict(final_model_state)
     accuracy, loss = evaluate_model(eval_model, test_dataset)
     metrics = protocol.metrics.get_summary()
+    metrics['elapsed_sec'] = float(time.time() - start_time)
     protocol.shutdown()
     return accuracy, loss, metrics
 
@@ -110,7 +112,8 @@ def tune_parameters():
         'momentum': [0.8, 0.9],
         'compression': ['topk', 'signsgd', 'qsgd'],
         'k': [50, 100],
-        'num_bits': [4, 8]
+        'num_bits': [4, 8],
+        'staleness_mode': ['quadratic', 'linear']
     }
 
     best_config = None
@@ -123,22 +126,30 @@ def tune_parameters():
                     for comp in param_ranges['compression']:
                         for k in param_ranges['k']:
                             for bits in param_ranges['num_bits']:
-                                config = {
-                                    'max_staleness': staleness,
-                                    'min_buffer_size': min_buf,
-                                    'max_buffer_size': max_buf,
-                                    'momentum': momentum,
-                                    'adaptive_weighting': True,
-                                    'compression': comp,
-                                    'k': k,
-                                    'num_bits': bits
-                                }
-                                acc, loss, metrics = run_experiment_with_config(config)
-                                score = acc - 0.01 * metrics['total_data_transmitted_mb']
-                                if score > best_score:
-                                    best_score = score
-                                    best_config = config
-                                print(f"Score: {score:.4f}, Acc: {acc:.4f}, Config: {config}")
+                                for staleness_mode in param_ranges['staleness_mode']:
+                                    config = {
+                                        'max_staleness': staleness,
+                                        'min_buffer_size': min_buf,
+                                        'max_buffer_size': max_buf,
+                                        'momentum': momentum,
+                                        'adaptive_weighting': True,
+                                        'compression': comp,
+                                        'k': k,
+                                        'num_bits': bits,
+                                        'staleness_mode': staleness_mode,
+                                    }
+                                    acc, loss, metrics = run_experiment_with_config(config)
+                                    score = tri_objective_score(
+                                        accuracy=acc,
+                                        communication_mb=metrics['total_data_transmitted_mb'],
+                                        latency_sec=metrics.get('elapsed_sec', 180.0),
+                                        comm_budget_mb=60.0,
+                                        latency_budget_sec=180,
+                                    )
+                                    if score > best_score:
+                                        best_score = score
+                                        best_config = config
+                                    print(f"Score: {score:.4f}, Acc: {acc:.4f}, Config: {config}")
 
     print("\nBest configuration found:")
     print(best_config)

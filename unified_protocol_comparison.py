@@ -24,6 +24,7 @@ from federated_protocol_framework import (
     create_protocol, ClientUpdate, FederatedProtocol
 )
 from optimized_protocol_config import generate_all_configs
+from metrics import tri_objective_score, within_budgets
 
 import os, random, numpy as np, torch
 
@@ -194,6 +195,9 @@ def compare_protocols(protocols_config: Dict, experiment_config: Dict) -> Dict:
         'output_dim': experiment_config['num_classes']
     }
 
+    comm_budget_mb = float(experiment_config.get('comm_budget_mb', 60.0))
+    latency_budget_sec = float(experiment_config.get('latency_budget_sec', experiment_config['duration']))
+
     results = {}
     for protocol_name, protocol_params in protocols_config.items():
         protocol = create_protocol(
@@ -248,10 +252,25 @@ def compare_protocols(protocols_config: Dict, experiment_config: Dict) -> Dict:
             id2label={i: f"intent_{i}" for i in range(experiment_config['num_classes'])}
         )
 
+        elapsed_sec = time.time() - start_time
         metrics = protocol.metrics.get_summary()
         metrics['final_accuracy'] = accuracy
         metrics['intent_f1'] = round(intent_f1, 4)
         metrics['explanation_bleu'] = round(expl_bleu, 4)
+        metrics['elapsed_sec'] = float(elapsed_sec)
+        metrics['tri_objective_score'] = tri_objective_score(
+            accuracy=float(accuracy),
+            communication_mb=float(metrics.get('total_data_transmitted_mb', 0.0)),
+            latency_sec=float(elapsed_sec),
+            comm_budget_mb=comm_budget_mb,
+            latency_budget_sec=latency_budget_sec,
+        )
+        metrics['within_budget'] = within_budgets(
+            communication_mb=float(metrics.get('total_data_transmitted_mb', 0.0)),
+            latency_sec=float(elapsed_sec),
+            comm_budget_mb=comm_budget_mb,
+            latency_budget_sec=latency_budget_sec,
+        )
         results[protocol_name] = metrics
 
         protocol.shutdown()
@@ -265,16 +284,21 @@ def compare_protocols(protocols_config: Dict, experiment_config: Dict) -> Dict:
 # -----------------------------
 # Main
 # -----------------------------
-def main():
-    """Main comparison experiment"""
-
-    # Baseline protocols
-    protocols_config = {
+def default_baseline_configs() -> Dict[str, Dict]:
+    """Centralized baseline config registry for fair comparisons."""
+    return {
         'fedavg': {'participation_rate': 0.5, 'max_round_time': 10.0},
         'fedasync': {'max_staleness': 10, 'learning_rate': 0.8},
         'fedbuff': {'buffer_size': 5, 'max_staleness': 15},
         'scaffold': {'learning_rate': 0.8, 'max_round_time': 10.0}
     }
+
+
+def main():
+    """Main comparison experiment"""
+
+    # Baseline protocols
+    protocols_config = default_baseline_configs()
 
     # Add all Improved Async configs (scenario x compression)
     improved_async_configs = generate_all_configs()
@@ -288,8 +312,19 @@ def main():
         'hidden_dim': 32,
         'num_classes': 3,
         'heterogeneity': 0.5,
-        'duration': 360
+        'duration': 360,
+        'comm_budget_mb': 60.0,
+        'latency_budget_sec': 360.0,
+        'include_autoscale_variants': False,
     }
+
+    if experiment_config.get('include_autoscale_variants', False):
+        # Optional scale-aware variants for robustness checks across different client counts.
+        for name, cfg in list(improved_async_configs.items()):
+            scaled_cfg = dict(cfg)
+            scaled_cfg['auto_scale_params'] = True
+            protocols_config[f"improved_async_{name}_autoscale"] = scaled_cfg
+
 
     results = compare_protocols(protocols_config, experiment_config)
 
